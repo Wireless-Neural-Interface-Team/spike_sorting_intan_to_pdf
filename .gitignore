@@ -1,2 +1,5 @@
 *.exe
 *.pyc
+
+# Code workspace files
+*.code-workspace

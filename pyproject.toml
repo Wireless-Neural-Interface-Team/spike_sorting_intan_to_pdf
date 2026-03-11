@@ -32,6 +32,7 @@ dependencies = [
     "numpy",
     "matplotlib",
     "PySide6>=6.4",
+    "mea-editor>=0.2.0",
 ]
 
 [project.scripts]
@@ -51,4 +52,6 @@ py-modules = [
     "pipeline_class",
     "pdf_generator_class",
     "gui_run_pipeline",
+    "gui_components",
+    "gui_pipeline_runner",
 ]

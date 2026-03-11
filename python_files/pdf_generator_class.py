@@ -191,7 +191,6 @@ class PDFGenerator:
             self.__folder,
             f"Summary_figures_sorting_{self.__pipeline._sorter.name}.{self.__format}",
         )
-        print(f"PDF output: {filename}")
         with PdfPages(filename) as pdf:
             # Page 1: structured project/pipeline summary.
             text = self._build_summary_text()

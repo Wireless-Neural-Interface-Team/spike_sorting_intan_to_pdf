@@ -1,13 +1,13 @@
 {
-  "folder_path": "C:/Spike Electrophysiology/20251205 - P8 retina/Recordings/20251205 - SpontaActi_RetinaP8_retina3_251205_165648",
-  "use_trigger": false,
+  "folder_path": "",
+  "use_trigger": true,
   "trigger_type": "electric",
   "trigger_threshold": "37000",
   "trigger_polarity": "Falling Edge",
   "trigger_min_interval": "5.1",
   "trigger_channel_index": "0",
-  "sorter_name": "tridesclous",
-  "my_probe_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Recordings/Micka\u00ebl/MEA_RdLGN64.json",
+  "sorter_name": "tridesclous2",
+  "my_probe_path": "",
   "protocol_params": {
     "preprocessing": {
       "bandpass_filter": {
@@ -44,6 +44,14 @@
         "include_multi_channel_metrics": false
       },
       "quality_metrics": {}
+    },
+    "sorter_params": {
+      "tridesclous2": {
+        "apply_motion_correction": "",
+        "apply_preprocessing": "",
+        "debug": "",
+        "save_array": ""
+      }
     }
   }
 }

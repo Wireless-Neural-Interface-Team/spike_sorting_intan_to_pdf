@@ -63,11 +63,13 @@ class Pipeline:
         self._rhs_files._pre_processed_signed_amplifier_channel_recording = rec
 
         # 3) Run sorter with the same recording object.
+        sorter_params = self._protocol_params.get("sorter_params", {}).get(self._sorter.name, {})
         sorting_results = ss.run_sorter(
             sorter_name=self._sorter.name,
             recording=rec,
             folder=self._output_sorter_folder,
-            remove_existing_folder = True
+            remove_existing_folder=True,
+            **sorter_params,
         )
         
         # 4) Remove duplicated spikes and store curated sorting in rhs_files.

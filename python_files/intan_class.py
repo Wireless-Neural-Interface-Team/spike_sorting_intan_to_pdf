@@ -11,6 +11,24 @@ from probe_class import Probe
 import spikeinterface.preprocessing as spre
 
 
+def load_channel_ids_only(folder_path):
+    """
+    Lightweight load: only the amplifier stream, to get channel_ids.
+    Avoids loading Stim and ADC streams. Returns list of channel IDs or None on error.
+    """
+    try:
+        rec = se.read_split_intan_files(
+            folder_path,
+            mode="concatenate",
+            stream_name="RHS2000 amplifier channel",
+            use_names_as_ids=False,
+            all_annotations=True,
+        )
+        return list(rec.get_channel_ids())
+    except Exception:
+        return None
+
+
 class IntanFile:
     """
     Container class for one Intan recording folder and derived objects.
@@ -98,12 +116,7 @@ class IntanFile:
         self.channel_ids = self._amplifier_channel_recording.get_channel_ids()
         self.number_of_channels = self._amplifier_channel_recording.get_num_channels()
         self.number_of_segments = self._amplifier_channel_recording.get_num_segments()
-        
-        print("Channel ids:", self.channel_ids )
-        print("Sampling frequency:", self.frequency )
-        print("Number of channels:", self.number_of_channels)
-        print("Number of segments:", self.number_of_segments)
-        
+
         # Convert unsigned amplifier signal to signed representation.
         self._signed_amplifier_channel_recording = spre.unsigned_to_signed(self._amplifier_channel_recording)
     
@@ -150,8 +163,7 @@ class IntanFile:
             trigger_timestamps = np.array(kept_timestamps)
 
         self.trigger_timestamps = trigger_timestamps
-        print(f"\n{len(self.trigger_timestamps)} passages au-dessus du seuil détectés.")
-    
+
     def associate_probe (self, probe):
         """
         Attach probe geometry to amplifier recording after channel alignment.
