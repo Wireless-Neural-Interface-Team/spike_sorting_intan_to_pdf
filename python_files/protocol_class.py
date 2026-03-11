@@ -1,99 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-Protocol configuration object used by the spike-sorting pipeline.
+Protocol configuration for the spike-sorting pipeline.
 
-This module defines a small container class that centralizes:
-1) preprocessing parameters (band-pass filter),
-2) postprocessing steps and their options.
+This module provides:
+- TypedDict for protocol structure (type hints, IDE support),
+- default_protocol_params() as single source of truth for the protocol dict.
 
-The resulting dictionary is intended to be consumed by downstream
-pipeline code.
+The resulting dictionary is consumed by Pipeline and PDFGenerator.
 """
 
-import copy
+from typing import TypedDict
 
 
-class Protocol:
-    """Store and expose analysis protocol parameters.
+class ProtocolParams(TypedDict, total=False):
+    """Type hints for the protocol params dict structure."""
+    preprocessing: dict
+    postprocessing: dict
+    _file_path: str
 
-    Parameters
-    ----------
-    min_freq : float | int
-        Lower cutoff frequency (Hz) for the band-pass preprocessing step.
-    max_freq : float | int
-        Upper cutoff frequency (Hz) for the band-pass preprocessing step.
-    file_path : str
-        Path to a protocol file or output location associated with this protocol.
-        It is kept as metadata for traceability and potential save/load features.
-    params : dict, optional
-        Full protocol params dict. If provided, used as-is (min_freq/max_freq ignored).
-        If None, built from min_freq and max_freq with default postprocessing.
+
+def default_protocol_params(min_freq: int = 400, max_freq: int = 5000) -> dict:
+    """Build the default protocol dictionary.
+
+    Single source of truth for preprocessing and postprocessing structure.
     """
-
-    def __init__(self, min_freq, max_freq, file_path, params=None):
-        """Build the protocol parameter dictionary used by the pipeline."""
-        # Keep the protocol path for bookkeeping (e.g., persistence, audit trail).
-        self._file_path = file_path
-
-        if params is not None:
-            self.params = copy.deepcopy(params)
-        else:
-            self.params = self._default_params(min_freq, max_freq)
-
-    def _default_params(self, min_freq, max_freq):
-        """Build the default protocol dictionary."""
-        return {
-            'preprocessing': {
-                # Band-pass filter configuration applied before spike sorting.
-                'bandpass_filter': {"freq_min" : min_freq, "freq_max" : max_freq},
-            },
-            # Postprocessing computes descriptive features and quality indicators
-            # from the sorted spikes. Some steps depend on outputs of previous steps.
-            #
-            # Recommended execution flow:
-            # 1) random_spikes -> provides a representative spike subset
-            # 2) waveforms      -> extracts waveform snippets per unit
-            # 3) templates      -> builds average waveform templates
-            # 4) derived metrics (amplitudes, locations, similarity, quality)
-            #
-            # Dependency note:
-            # templates is a key parent for many downstream computations.
-            # If templates is skipped, several metrics below may fail or be empty.
-            'postprocessing': {
-                # Sampling / baseline descriptors
-                'random_spikes': {},
-                'noise_levels': {},
-                'correlograms': {},
-
-                # Waveform representation
-                'waveforms': {},
-                # Example dependency chain:
-                # random_spikes -> templates -> amplitude_scalings,
-                # spike_amplitudes, spike_locations, template_similarity,
-                # unit_locations, quality_metrics.
-                'templates': {},
-
-                # Amplitude-related descriptors
-                'amplitude_scalings': {},
-                'spike_amplitudes': {},
-
-                # Spatial descriptors
-                'unit_locations': {'method': 'center_of_mass'},
-                'spike_locations': {},
-
-                # Cross-unit and per-template comparisons
-                'template_similarity': {},
-                'template_metrics': {},
-
-                # Final unit-level quality summary metrics
-                'quality_metrics': {}
-            },
-        }
-        
-    def __repr__(self):
-        """Return the protocol dictionary for quick inspection/printing."""
-        return (self.params)
-    
-    
-    
-    
+    return {
+        "preprocessing": {
+            "bandpass_filter": {"freq_min": min_freq, "freq_max": max_freq},
+        },
+        "postprocessing": {
+            "random_spikes": {},
+            "noise_levels": {},
+            "correlograms": {},
+            "waveforms": {},
+            "templates": {},
+            "amplitude_scalings": {},
+            "spike_amplitudes": {},
+            "unit_locations": {"method": "center_of_mass"},
+            "spike_locations": {},
+            "template_similarity": {},
+            "template_metrics": {},
+            "quality_metrics": {},
+        },
+    }

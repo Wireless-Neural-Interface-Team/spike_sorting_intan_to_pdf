@@ -23,11 +23,11 @@ class Pipeline:
       - Build and compute a SortingAnalyzer for downstream visualization/export.
     """
     
-    def __init__(self, sorter, folder_path, protocol, rhs_files):
+    def __init__(self, sorter, folder_path, protocol_params: dict, rhs_files):
         # Core objects passed from the main script/GUI.
         self._sorter = sorter
         # Keep an independent protocol copy to avoid side effects outside pipeline.
-        self._protocol = copy.deepcopy(protocol)
+        self._protocol_params = copy.deepcopy(protocol_params)
         self._rhs_files = rhs_files
         # Output folders for sorter files and analyzer binary folder.
         self._output_sorter_folder = os.path.join(folder_path, f"Sorting_pipeline_{sorter.name}")
@@ -44,7 +44,7 @@ class Pipeline:
         current protocol conventions.
         """
         if len(self._rhs_files.trigger_timestamps) != 0:
-                self._protocol.params['preprocessing']['remove_artifacts'] = {
+                self._protocol_params['preprocessing']['remove_artifacts'] = {
                                                         "list_triggers": self._rhs_files.trigger_timestamps,
                                                         "mode": "zeros"}
 
@@ -55,7 +55,7 @@ class Pipeline:
         # 1) Apply preprocessing and keep a single local recording object.
         rec = spre.apply_preprocessing_pipeline(
             self._rhs_files._signed_amplifier_channel_recording,
-            self._protocol.params['preprocessing'],
+            self._protocol_params['preprocessing'],
         )
         # 2) Re-attach probe after preprocessing when available.
         if getattr(self._rhs_files, "_probe", None) is not None:
@@ -88,5 +88,5 @@ class Pipeline:
                 ) from exc
             raise
         # 6) Compute postprocessing extensions and keep analyzer for plotting/PDF.
-        analyzer_result.compute(self._protocol.params['postprocessing'])
+        analyzer_result.compute(self._protocol_params['postprocessing'])
         self._rhs_files._computed_analyzer_result = analyzer_result

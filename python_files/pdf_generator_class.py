@@ -119,14 +119,14 @@ class PDFGenerator:
     def _build_summary_text(self):
         """Build a structured text report for PDF page 1."""
         rhs = self.__rhs_files
-        protocol = self.__pipeline._protocol
+        protocol_params = self.__pipeline._protocol_params
         sorter = self.__pipeline._sorter
         ts_params = getattr(rhs, "_timestamps_parameters", None)
         trigger = getattr(ts_params, "trigger", None)
 
-        protocol_pre = pformat(protocol.params.get("preprocessing", {}), width=100, compact=False)
-        protocol_post_keys = list(protocol.params.get("postprocessing", {}).keys())
-        bandpass = protocol.params.get("preprocessing", {}).get("bandpass_filter", {})
+        protocol_pre = pformat(protocol_params.get("preprocessing", {}), width=100, compact=False)
+        protocol_post_keys = list(protocol_params.get("postprocessing", {}).keys())
+        bandpass = protocol_params.get("preprocessing", {}).get("bandpass_filter", {})
 
         channel_count = len(rhs.channel_ids) if rhs.channel_ids is not None else 0
         channel_ids_full = ", ".join(map(str, rhs.channel_ids)) if channel_count else "N/A"
@@ -143,7 +143,7 @@ class PDFGenerator:
             "=" * 80,
             "",
             "[1] Protocol",
-            f"- Protocol file path: {getattr(protocol, '_file_path', 'N/A')}",
+            f"- Protocol file path: {protocol_params.get('_file_path', 'N/A')}",
             f"- Bandpass min/max (Hz): {bandpass.get('freq_min', 'N/A')} / {bandpass.get('freq_max', 'N/A')}",
             f"- Preprocessing config: {protocol_pre}",
             f"- Postprocessing steps ({len(protocol_post_keys)}): {', '.join(protocol_post_keys)}",

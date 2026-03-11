@@ -29,7 +29,7 @@ import threadpoolctl
 from trigger_class import Trigger
 from timestamps_class import TimestampsParameters
 from sorter_class import Sorter
-from protocol_class import Protocol
+from protocol_class import default_protocol_params
 from intan_class import IntanFile
 from probe_class import Probe
 from pipeline_class import Pipeline
@@ -63,14 +63,15 @@ with open(os.path.join(folder_path, "errors_traceback.txt"), "w") as error_file:
 
     # Protocol describing preprocessing and postprocessing settings.
     my_protocol_path = r"C:\Spike Electrophysiology\20251205 - P8 retina\Recordings\my_protocol.json"
-    my_protocol = Protocol(400, 5000, my_protocol_path)
+    protocol_params = default_protocol_params(400, 5000)
+    protocol_params["_file_path"] = my_protocol_path
 
     # Probe geometry/mapping file used to assign channels to electrode positions.
     myProbe_df = Probe("C:/Spikesorting_utilities/MEA_RdLGN64.json")
     rhs_files.associate_probe(myProbe_df)
 
     # Build and execute the full analysis pipeline.
-    pipeline = Pipeline(sorter, folder_path, my_protocol, rhs_files)
+    pipeline = Pipeline(sorter, folder_path, protocol_params, rhs_files)
 
     # Generate the final PDF report from pipeline outputs.
     PDFGenerator(folder_path, pipeline)

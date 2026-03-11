@@ -162,6 +162,7 @@ class IntanFile:
           - reorder and reindex device_channel_indices,
           - convert dataframe to Probe object and attach it.
         """
+        self._probe_file_path = getattr(probe, "_file_path", None)
         self._probe = probe
         probe_df = self._probe._dataframe
 
