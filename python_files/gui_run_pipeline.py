@@ -58,8 +58,9 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QScrollArea,
     QFrame,
+    QTabWidget,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, QObject
 from PySide6.QtGui import QAction
 
 from protocol_class import default_protocol_params
@@ -90,6 +91,7 @@ class PipelineGUI(QMainWindow):
     log_signal = Signal(str)
     progress_signal = Signal(bool)
     pipeline_done_signal = Signal(bool, object)  # (success, payload)
+    sorter_params_loaded_signal = Signal(str, object, object)  # (sorter_name, params, descriptions)
 
     def __init__(self):
         super().__init__()
@@ -110,6 +112,10 @@ class PipelineGUI(QMainWindow):
             "detect_bad_channels",
             "phase_shift",
             "rectify",
+            "zscore",
+            "whiten",
+            "clip",
+            "resample",
         ]
         self._filter_steps = ["bandpass_filter", "highpass_filter", "notch_filter", "gaussian_filter"]
         self._preprocessing_step_defaults = {
@@ -122,6 +128,10 @@ class PipelineGUI(QMainWindow):
             "detect_bad_channels": {"method": "std", "std_mad_threshold": 5.0},
             "phase_shift": {},
             "rectify": {},
+            "zscore": {"mode": "median+mad"},
+            "whiten": {"mode": "global"},
+            "clip": {"a_min": -100.0, "a_max": 100.0},
+            "resample": {"resample_rate": 20000.0, "margin_ms": 5.0},
         }
         self._preprocessing_step_param_options = {
             "common_reference": {
@@ -131,6 +141,8 @@ class PipelineGUI(QMainWindow):
             "detect_bad_channels": {
                 "method": ["std", "mad", "coherence+psd"],
             },
+            "zscore": {"mode": ["median+mad", "mean+std"]},
+            "whiten": {"mode": ["global", "local"]},
         }
         self._preprocessing_step_enabled_widgets = {}
         self._preproc_step_params_widgets = {}
@@ -140,6 +152,8 @@ class PipelineGUI(QMainWindow):
         self._channels_debounce_timer = None
         self._channels_id_cache = {}
         self._channels_loading_key = None
+        self._sorter_params_cache = {}  # sorter_name -> (params, descriptions)
+        self._sorter_params_load_thread = None
         self._save_debounce_timer = None
         self._mea_editor_window = None
         self._probe_temp_path = None
@@ -153,6 +167,7 @@ class PipelineGUI(QMainWindow):
         self.log_signal.connect(self._log_impl)
         self.progress_signal.connect(self._progress_impl)
         self.pipeline_done_signal.connect(self._on_pipeline_done)
+        self.sorter_params_loaded_signal.connect(self._on_sorter_params_loaded)
         self._build_ui()
         self._load_last_session()
 
@@ -372,6 +387,10 @@ class PipelineGUI(QMainWindow):
         )
         self.preproc_filter_choice_combo.currentTextChanged.connect(self._on_filter_choice_changed)
         self.preproc_filter_choice_combo.setMinimumWidth(140)
+        self.preproc_filter_choice_combo.setStyleSheet(
+            "QComboBox { background-color: #ffffff; } "
+            "QComboBox QAbstractItemView { background-color: #ffffff; }"
+        )
         filter_layout.addWidget(self.preproc_filter_choice_combo)
         self.preproc_filter_params_container = QWidget()
         self.preproc_filter_params_layout = QHBoxLayout(self.preproc_filter_params_container)
@@ -411,101 +430,231 @@ class PipelineGUI(QMainWindow):
 
         protocol_main.addWidget(preprocessing_group)
 
-        # --- Postprocessing group ---
+        # --- Postprocessing group (tabbed for readability) ---
         postprocessing_group = QGroupBox("Protocol postprocessing")
-        postprocessing_group.setToolTip("")
-        postprocessing_layout = QGridLayout(postprocessing_group)
-        postprocessing_layout.setColumnStretch(1, 1)
-        postprocessing_layout.setColumnMinimumWidth(2, 16)
+        postprocessing_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; margin-top: 8px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+        )
+        postprocessing_main = QVBoxLayout(postprocessing_group)
+        self._postproc_tabs = QTabWidget()
 
-        post = 0
-        postprocessing_layout.addWidget(QLabel("Unit locations method"), post, 0)
-        self.protocol_unit_locations_method = QComboBox()
-        self.protocol_unit_locations_method.addItems(["center_of_mass", "monopolar_triangulation"])
-        self.protocol_unit_locations_method.setMaximumWidth(180)
-        self.protocol_unit_locations_method.currentTextChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_unit_locations_method, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Method to estimate unit locations."), post, 2)
-        post += 1
+        def _add_row(grid, row, label_text, widget, tooltip=""):
+            grid.addWidget(QLabel(label_text), row, 0)
+            grid.addWidget(widget, row, 1)
+            if tooltip:
+                grid.addWidget(self._make_info_badge(tooltip), row, 2)
 
-        postprocessing_layout.addWidget(QLabel("Random spikes max_spikes_per_unit"), post, 0)
-        self.protocol_random_spikes_max = QSpinBox()
-        self.protocol_random_spikes_max.setRange(1, 10000)
-        self.protocol_random_spikes_max.setValue(1000)
-        self.protocol_random_spikes_max.setMaximumWidth(120)
-        self.protocol_random_spikes_max.valueChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_random_spikes_max, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Max random spikes per unit to sample."), post, 2)
-        post += 1
-
-        postprocessing_layout.addWidget(QLabel("Waveforms ms_before"), post, 0)
+        # Tab 1: Waveforms & Templates
+        tab_wf = QWidget()
+        grid_wf = QGridLayout(tab_wf)
+        grid_wf.setColumnStretch(1, 1)
+        grid_wf.setColumnMinimumWidth(2, 16)
+        r = 0
         self.protocol_waveforms_ms_before = QDoubleSpinBox()
         self.protocol_waveforms_ms_before.setRange(0.1, 10)
         self.protocol_waveforms_ms_before.setValue(1.0)
         self.protocol_waveforms_ms_before.setSingleStep(0.1)
         self.protocol_waveforms_ms_before.setMaximumWidth(120)
         self.protocol_waveforms_ms_before.valueChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_waveforms_ms_before, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Waveform window before peak (ms)."), post, 2)
-        post += 1
-
-        postprocessing_layout.addWidget(QLabel("Waveforms ms_after"), post, 0)
+        _add_row(grid_wf, r, "Waveforms ms_before:", self.protocol_waveforms_ms_before, "Window before peak (ms)")
+        r += 1
         self.protocol_waveforms_ms_after = QDoubleSpinBox()
         self.protocol_waveforms_ms_after.setRange(0.1, 10)
         self.protocol_waveforms_ms_after.setValue(2.0)
         self.protocol_waveforms_ms_after.setSingleStep(0.1)
         self.protocol_waveforms_ms_after.setMaximumWidth(120)
         self.protocol_waveforms_ms_after.valueChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_waveforms_ms_after, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Waveform window after peak (ms)."), post, 2)
-        post += 1
+        _add_row(grid_wf, r, "Waveforms ms_after:", self.protocol_waveforms_ms_after, "Window after peak (ms)")
+        r += 1
+        self.protocol_templates_ms_before = QDoubleSpinBox()
+        self.protocol_templates_ms_before.setRange(0.1, 10)
+        self.protocol_templates_ms_before.setValue(1.0)
+        self.protocol_templates_ms_before.setSingleStep(0.1)
+        self.protocol_templates_ms_before.setMaximumWidth(120)
+        self.protocol_templates_ms_before.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_wf, r, "Templates ms_before:", self.protocol_templates_ms_before, "Window before peak (ms)")
+        r += 1
+        self.protocol_templates_ms_after = QDoubleSpinBox()
+        self.protocol_templates_ms_after.setRange(0.1, 10)
+        self.protocol_templates_ms_after.setValue(2.0)
+        self.protocol_templates_ms_after.setSingleStep(0.1)
+        self.protocol_templates_ms_after.setMaximumWidth(120)
+        self.protocol_templates_ms_after.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_wf, r, "Templates ms_after:", self.protocol_templates_ms_after, "Window after peak (ms)")
+        r += 1
+        self.protocol_spike_amplitudes_peak = QComboBox()
+        self.protocol_spike_amplitudes_peak.addItems(["neg", "pos"])
+        self.protocol_spike_amplitudes_peak.setMaximumWidth(120)
+        self.protocol_spike_amplitudes_peak.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_wf, r, "Spike amplitudes peak_sign:", self.protocol_spike_amplitudes_peak, "Peak sign")
+        self._postproc_tabs.addTab(tab_wf, "Waveforms & Templates")
 
-        postprocessing_layout.addWidget(QLabel("Correlograms window_ms"), post, 0)
+        # Tab 2: Locations & Sampling
+        tab_loc = QWidget()
+        grid_loc = QGridLayout(tab_loc)
+        grid_loc.setColumnStretch(1, 1)
+        grid_loc.setColumnMinimumWidth(2, 16)
+        r = 0
+        self.protocol_unit_locations_method = QComboBox()
+        self.protocol_unit_locations_method.addItems(["center_of_mass", "monopolar_triangulation"])
+        self.protocol_unit_locations_method.setMaximumWidth(180)
+        self.protocol_unit_locations_method.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_loc, r, "Unit locations method:", self.protocol_unit_locations_method, "Method")
+        r += 1
+        self.protocol_spike_locations_method = QComboBox()
+        self.protocol_spike_locations_method.addItems(["center_of_mass", "monopolar_triangulation"])
+        self.protocol_spike_locations_method.setMaximumWidth(180)
+        self.protocol_spike_locations_method.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_loc, r, "Spike locations method:", self.protocol_spike_locations_method, "Method")
+        r += 1
+        self.protocol_random_spikes_max = QSpinBox()
+        self.protocol_random_spikes_max.setRange(1, 10000)
+        self.protocol_random_spikes_max.setValue(1000)
+        self.protocol_random_spikes_max.setMaximumWidth(120)
+        self.protocol_random_spikes_max.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_loc, r, "Random spikes max_per_unit:", self.protocol_random_spikes_max, "Max spikes")
+        r += 1
+        self.protocol_random_spikes_method = QComboBox()
+        self.protocol_random_spikes_method.addItems(["uniform", "all"])
+        self.protocol_random_spikes_method.setMaximumWidth(120)
+        self.protocol_random_spikes_method.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_loc, r, "Random spikes method:", self.protocol_random_spikes_method, "uniform | all")
+        r += 1
+        self.protocol_random_spikes_seed = QSpinBox()
+        self.protocol_random_spikes_seed.setRange(-1, 999999)
+        self.protocol_random_spikes_seed.setSpecialValueText("None")
+        self.protocol_random_spikes_seed.setValue(-1)
+        self.protocol_random_spikes_seed.setMaximumWidth(120)
+        self.protocol_random_spikes_seed.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_loc, r, "Random spikes seed:", self.protocol_random_spikes_seed, "-1 = None")
+        self._postproc_tabs.addTab(tab_loc, "Locations & Sampling")
+
+        # Tab 3: Correlograms & ISI
+        tab_cc = QWidget()
+        grid_cc = QGridLayout(tab_cc)
+        grid_cc.setColumnStretch(1, 1)
+        grid_cc.setColumnMinimumWidth(2, 16)
+        r = 0
         self.protocol_correlograms_window = QDoubleSpinBox()
         self.protocol_correlograms_window.setRange(1, 500)
         self.protocol_correlograms_window.setValue(50.0)
         self.protocol_correlograms_window.setMaximumWidth(120)
         self.protocol_correlograms_window.valueChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_correlograms_window, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Correlogram total window (ms)."), post, 2)
-        post += 1
-
-        postprocessing_layout.addWidget(QLabel("Correlograms bin_ms"), post, 0)
+        _add_row(grid_cc, r, "Correlograms window_ms:", self.protocol_correlograms_window, "Total window (ms)")
+        r += 1
         self.protocol_correlograms_bin = QDoubleSpinBox()
         self.protocol_correlograms_bin.setRange(0.1, 10)
         self.protocol_correlograms_bin.setValue(1.0)
         self.protocol_correlograms_bin.setSingleStep(0.1)
         self.protocol_correlograms_bin.setMaximumWidth(120)
         self.protocol_correlograms_bin.valueChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_correlograms_bin, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Correlogram bin size (ms)."), post, 2)
-        post += 1
+        _add_row(grid_cc, r, "Correlograms bin_ms:", self.protocol_correlograms_bin, "Bin size (ms)")
+        r += 1
+        self.protocol_correlograms_method = QComboBox()
+        self.protocol_correlograms_method.addItems(["auto", "numpy"])
+        self.protocol_correlograms_method.setMaximumWidth(120)
+        self.protocol_correlograms_method.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_cc, r, "Correlograms method:", self.protocol_correlograms_method, "auto | numpy")
+        r += 1
+        self.protocol_isi_window = QDoubleSpinBox()
+        self.protocol_isi_window.setRange(1, 500)
+        self.protocol_isi_window.setValue(50.0)
+        self.protocol_isi_window.setMaximumWidth(120)
+        self.protocol_isi_window.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_cc, r, "ISI histograms window_ms:", self.protocol_isi_window, "Window (ms)")
+        r += 1
+        self.protocol_isi_bin = QDoubleSpinBox()
+        self.protocol_isi_bin.setRange(0.1, 10)
+        self.protocol_isi_bin.setValue(1.0)
+        self.protocol_isi_bin.setSingleStep(0.1)
+        self.protocol_isi_bin.setMaximumWidth(120)
+        self.protocol_isi_bin.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_cc, r, "ISI histograms bin_ms:", self.protocol_isi_bin, "Bin size (ms)")
+        self._postproc_tabs.addTab(tab_cc, "Correlograms & ISI")
 
-        postprocessing_layout.addWidget(QLabel("Spike amplitudes peak_sign"), post, 0)
-        self.protocol_spike_amplitudes_peak = QComboBox()
-        self.protocol_spike_amplitudes_peak.addItems(["neg", "pos"])
-        self.protocol_spike_amplitudes_peak.setMaximumWidth(120)
-        self.protocol_spike_amplitudes_peak.currentTextChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_spike_amplitudes_peak, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Peak sign used for spike amplitudes."), post, 2)
-        post += 1
-
-        postprocessing_layout.addWidget(QLabel("Template similarity method"), post, 0)
+        # Tab 4: Template metrics & PC
+        tab_metrics = QWidget()
+        grid_metrics = QGridLayout(tab_metrics)
+        grid_metrics.setColumnStretch(1, 1)
+        grid_metrics.setColumnMinimumWidth(2, 16)
+        r = 0
         self.protocol_template_similarity_method = QComboBox()
-        self.protocol_template_similarity_method.addItems(["cosine_similarity"])
+        self.protocol_template_similarity_method.addItems(["cosine", "l2"])
         self.protocol_template_similarity_method.setMaximumWidth(180)
         self.protocol_template_similarity_method.currentTextChanged.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_template_similarity_method, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Template similarity method."), post, 2)
-        post += 1
-
-        postprocessing_layout.addWidget(QLabel("Template metrics multi_channel"), post, 0)
-        self.protocol_template_metrics_multi = QCheckBox("")
+        _add_row(grid_metrics, r, "Template similarity method:", self.protocol_template_similarity_method, "cosine | l2")
+        r += 1
+        self.protocol_template_similarity_max_lag = QDoubleSpinBox()
+        self.protocol_template_similarity_max_lag.setRange(0, 100)
+        self.protocol_template_similarity_max_lag.setValue(0)
+        self.protocol_template_similarity_max_lag.setMaximumWidth(120)
+        self.protocol_template_similarity_max_lag.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_metrics, r, "Template similarity max_lag_ms:", self.protocol_template_similarity_max_lag, "Max lag (ms)")
+        r += 1
+        self.protocol_template_similarity_support = QComboBox()
+        self.protocol_template_similarity_support.addItems(["union", "min"])
+        self.protocol_template_similarity_support.setMaximumWidth(120)
+        self.protocol_template_similarity_support.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_metrics, r, "Template similarity support:", self.protocol_template_similarity_support, "union | min")
+        r += 1
+        self.protocol_template_metrics_multi = QCheckBox("Include multi-channel metrics")
         self.protocol_template_metrics_multi.setChecked(False)
         self.protocol_template_metrics_multi.toggled.connect(self._update_protocol_from_form)
-        postprocessing_layout.addWidget(self.protocol_template_metrics_multi, post, 1)
-        postprocessing_layout.addWidget(self._make_info_badge("Include multi-channel template metrics."), post, 2)
+        _add_row(grid_metrics, r, "Template metrics:", self.protocol_template_metrics_multi, "")
+        r += 1
+        self.protocol_template_metrics_peak = QComboBox()
+        self.protocol_template_metrics_peak.addItems(["neg", "pos"])
+        self.protocol_template_metrics_peak.setMaximumWidth(120)
+        self.protocol_template_metrics_peak.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_metrics, r, "Template metrics peak_sign:", self.protocol_template_metrics_peak, "neg | pos")
+        r += 1
+        self.protocol_pc_n_components = QSpinBox()
+        self.protocol_pc_n_components.setRange(1, 20)
+        self.protocol_pc_n_components.setValue(5)
+        self.protocol_pc_n_components.setMaximumWidth(120)
+        self.protocol_pc_n_components.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_metrics, r, "PC n_components:", self.protocol_pc_n_components, "Number of PCs")
+        r += 1
+        self.protocol_pc_mode = QComboBox()
+        self.protocol_pc_mode.addItems(["by_channel_local", "by_channel_global", "concatenated"])
+        self.protocol_pc_mode.setMaximumWidth(180)
+        self.protocol_pc_mode.currentTextChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_metrics, r, "PC mode:", self.protocol_pc_mode, "Computation mode")
+        r += 1
+        self.protocol_pc_whiten = QCheckBox("Whiten")
+        self.protocol_pc_whiten.setChecked(True)
+        self.protocol_pc_whiten.toggled.connect(self._update_protocol_from_form)
+        _add_row(grid_metrics, r, "PC whiten:", self.protocol_pc_whiten, "")
+        self._postproc_tabs.addTab(tab_metrics, "Template & PC")
 
+        # Tab 5: Amplitude scalings
+        tab_amp = QWidget()
+        grid_amp = QGridLayout(tab_amp)
+        grid_amp.setColumnStretch(1, 1)
+        grid_amp.setColumnMinimumWidth(2, 16)
+        r = 0
+        self.protocol_amplitude_scalings_max_dense = QSpinBox()
+        self.protocol_amplitude_scalings_max_dense.setRange(1, 64)
+        self.protocol_amplitude_scalings_max_dense.setValue(16)
+        self.protocol_amplitude_scalings_max_dense.setMaximumWidth(120)
+        self.protocol_amplitude_scalings_max_dense.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_amp, r, "max_dense_channels:", self.protocol_amplitude_scalings_max_dense, "Max channels")
+        r += 1
+        self.protocol_amplitude_scalings_delta = QDoubleSpinBox()
+        self.protocol_amplitude_scalings_delta.setRange(0.1, 20)
+        self.protocol_amplitude_scalings_delta.setValue(2.0)
+        self.protocol_amplitude_scalings_delta.setMaximumWidth(120)
+        self.protocol_amplitude_scalings_delta.valueChanged.connect(self._update_protocol_from_form)
+        _add_row(grid_amp, r, "delta_collision_ms:", self.protocol_amplitude_scalings_delta, "Collision window (ms)")
+        r += 1
+        self.protocol_amplitude_scalings_handle = QCheckBox("Handle collisions")
+        self.protocol_amplitude_scalings_handle.setChecked(True)
+        self.protocol_amplitude_scalings_handle.toggled.connect(self._update_protocol_from_form)
+        _add_row(grid_amp, r, "handle_collisions:", self.protocol_amplitude_scalings_handle, "")
+        self._postproc_tabs.addTab(tab_amp, "Amplitude scalings")
+
+        postprocessing_main.addWidget(self._postproc_tabs)
         protocol_main.addWidget(postprocessing_group)
 
         # Protocol buttons (Load / Save / Reset apply to full protocol)
@@ -595,7 +744,7 @@ class PipelineGUI(QMainWindow):
         content.addWidget(right_column, 1)
         self._apply_protocol_to_form(self._protocol_params)  # Apply default protocol to dynamic form
         self._update_protocol_from_form()  # Sync initial form values to dict
-        self._rebuild_sorter_params_ui()  # Build sorter params for initial sorter
+        QTimer.singleShot(0, self._rebuild_sorter_params_ui)  # Defer to keep window responsive
 
         main_layout.addLayout(content, 1)
 
@@ -636,18 +785,23 @@ class PipelineGUI(QMainWindow):
 
     def _on_sorter_changed(self):
         """When sorter selection changes, save current params and rebuild UI for new sorter."""
-        # Save OLD sorter's params before rebuild (combo already shows NEW sorter, widgets still show OLD)
         if self._current_sorter_name:
             self._update_sorter_params_from_form(target_sorter=self._current_sorter_name)
         self._rebuild_sorter_params_ui()
         self._save_last_session()
 
+    def _on_sorter_params_loaded(self, sorter_name, params, descriptions):
+        """Called when sorter params are loaded in background. Update cache and rebuild if still selected."""
+        self._sorter_params_cache[sorter_name] = (params, descriptions)
+        if self.sorter_combo.currentText().strip() == sorter_name:
+            self._populate_sorter_params_widgets(sorter_name, params, descriptions)
+            self._current_sorter_name = sorter_name
+
     def _rebuild_sorter_params_ui(self):
-        """Rebuild the sorter parameters section for the currently selected sorter."""
+        """Rebuild the sorter parameters section. Uses cache or loads in background."""
         sorter_name = self.sorter_combo.currentText().strip()
         if not sorter_name:
             return
-        # Clear existing widgets (labels + value widgets) from the layout
         while self.sorter_params_layout.count():
             item = self.sorter_params_layout.takeAt(0)
             if item.widget():
@@ -656,12 +810,33 @@ class PipelineGUI(QMainWindow):
         if not SORTERS_AVAILABLE:
             self._current_sorter_name = sorter_name
             return
-        try:
-            params = get_default_sorter_params(sorter_name)
-            descriptions = get_sorter_params_description(sorter_name)
-        except Exception:
-            params = {}
-            descriptions = {}
+        if sorter_name in self._sorter_params_cache:
+            params, descriptions = self._sorter_params_cache[sorter_name]
+            self._populate_sorter_params_widgets(sorter_name, params, descriptions)
+            self._current_sorter_name = sorter_name
+        else:
+            self._current_sorter_name = None
+            loading = QLabel("Loading sorter params...")
+            loading.setStyleSheet("color: gray; font-style: italic;")
+            self.sorter_params_layout.addWidget(loading, 0, 0)
+            def _load():
+                try:
+                    p = get_default_sorter_params(sorter_name)
+                    d = get_sorter_params_description(sorter_name)
+                    self.sorter_params_loaded_signal.emit(sorter_name, p, d)
+                except Exception:
+                    self.sorter_params_loaded_signal.emit(sorter_name, {}, {})
+            t = threading.Thread(target=_load, daemon=True)
+            t.start()
+            self._sorter_params_load_thread = t
+
+    def _populate_sorter_params_widgets(self, sorter_name, params, descriptions):
+        """Populate the sorter params layout with widgets. Clears layout first."""
+        while self.sorter_params_layout.count():
+            item = self.sorter_params_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._sorter_param_widgets.clear()
         # Restore saved values for this sorter (block signals to avoid N saves during init)
         saved = self._protocol_params.get("sorter_params", {}).get(sorter_name, {})
         row = 0
@@ -720,7 +895,6 @@ class PipelineGUI(QMainWindow):
             self.sorter_params_layout.addWidget(w, row, 2)
             self._sorter_param_widgets[key] = w
             row += 1
-        self._current_sorter_name = sorter_name
 
     def _update_sorter_params_from_form(self, target_sorter=None):
         """Read sorter param widgets and store in protocol_params."""
@@ -729,10 +903,14 @@ class PipelineGUI(QMainWindow):
             return
         if not SORTERS_AVAILABLE:
             return
-        try:
-            defaults = get_default_sorter_params(sorter_name)
-        except Exception:
-            defaults = {}
+        if sorter_name in self._sorter_params_cache:
+            defaults, _ = self._sorter_params_cache[sorter_name]
+        else:
+            try:
+                defaults = get_default_sorter_params(sorter_name)
+                self._sorter_params_cache.setdefault(sorter_name, (defaults, {}))
+            except Exception:
+                defaults = {}
         self._protocol_params.setdefault("sorter_params", {})
         self._protocol_params["sorter_params"].setdefault(sorter_name, {})
         for key, w in self._sorter_param_widgets.items():
@@ -765,10 +943,14 @@ class PipelineGUI(QMainWindow):
         sorter_name = self.sorter_combo.currentText().strip()
         if not sorter_name or not SORTERS_AVAILABLE:
             return
-        try:
-            defaults = get_default_sorter_params(sorter_name)
-        except Exception:
-            return
+        if sorter_name in self._sorter_params_cache:
+            defaults, _ = self._sorter_params_cache[sorter_name]
+        else:
+            try:
+                defaults = get_default_sorter_params(sorter_name)
+                self._sorter_params_cache.setdefault(sorter_name, (defaults, {}))
+            except Exception:
+                return
         self._protocol_params.setdefault("sorter_params", {})
         self._protocol_params["sorter_params"][sorter_name] = copy.deepcopy(defaults)
         self._rebuild_sorter_params_ui()
@@ -1293,6 +1475,8 @@ class PipelineGUI(QMainWindow):
     def _set_filter_steps_exclusive(self, selected_filter):
         for step_name in self._filter_steps:
             self._set_preproc_step_enabled(step_name, step_name == selected_filter)
+        # Hide the entire filter params container when no filter is selected
+        self.preproc_filter_params_container.setVisible(selected_filter is not None)
 
     def _sync_filter_choice_from_checkboxes(self):
         active = "None"
@@ -1347,15 +1531,34 @@ class PipelineGUI(QMainWindow):
             preprocessing[step_name] = copy.deepcopy(step_params)
 
         p["preprocessing"] = preprocessing
-        p.setdefault("postprocessing", {}).setdefault("unit_locations", {})["method"] = self.protocol_unit_locations_method.currentText()
-        p.setdefault("postprocessing", {}).setdefault("random_spikes", {})["max_spikes_per_unit"] = self.protocol_random_spikes_max.value()
-        p.setdefault("postprocessing", {}).setdefault("waveforms", {})["ms_before"] = self.protocol_waveforms_ms_before.value()
-        p.setdefault("postprocessing", {}).setdefault("waveforms", {})["ms_after"] = self.protocol_waveforms_ms_after.value()
-        p.setdefault("postprocessing", {}).setdefault("correlograms", {})["window_ms"] = self.protocol_correlograms_window.value()
-        p.setdefault("postprocessing", {}).setdefault("correlograms", {})["bin_ms"] = self.protocol_correlograms_bin.value()
-        p.setdefault("postprocessing", {}).setdefault("spike_amplitudes", {})["peak_sign"] = self.protocol_spike_amplitudes_peak.currentText()
-        p.setdefault("postprocessing", {}).setdefault("template_similarity", {})["method"] = self.protocol_template_similarity_method.currentText()
-        p.setdefault("postprocessing", {}).setdefault("template_metrics", {})["include_multi_channel_metrics"] = self.protocol_template_metrics_multi.isChecked()
+        pp = p.setdefault("postprocessing", {})
+        pp.setdefault("unit_locations", {})["method"] = self.protocol_unit_locations_method.currentText()
+        pp.setdefault("random_spikes", {})["max_spikes_per_unit"] = self.protocol_random_spikes_max.value()
+        pp.setdefault("random_spikes", {})["method"] = self.protocol_random_spikes_method.currentText()
+        rs_seed = self.protocol_random_spikes_seed.value()
+        pp.setdefault("random_spikes", {})["seed"] = None if rs_seed < 0 else rs_seed
+        pp.setdefault("waveforms", {})["ms_before"] = self.protocol_waveforms_ms_before.value()
+        pp.setdefault("waveforms", {})["ms_after"] = self.protocol_waveforms_ms_after.value()
+        pp.setdefault("templates", {})["ms_before"] = self.protocol_templates_ms_before.value()
+        pp.setdefault("templates", {})["ms_after"] = self.protocol_templates_ms_after.value()
+        pp.setdefault("correlograms", {})["window_ms"] = self.protocol_correlograms_window.value()
+        pp.setdefault("correlograms", {})["bin_ms"] = self.protocol_correlograms_bin.value()
+        pp.setdefault("correlograms", {})["method"] = self.protocol_correlograms_method.currentText()
+        pp.setdefault("isi_histograms", {})["window_ms"] = self.protocol_isi_window.value()
+        pp.setdefault("isi_histograms", {})["bin_ms"] = self.protocol_isi_bin.value()
+        pp.setdefault("spike_amplitudes", {})["peak_sign"] = self.protocol_spike_amplitudes_peak.currentText()
+        pp.setdefault("spike_locations", {})["method"] = self.protocol_spike_locations_method.currentText()
+        pp.setdefault("template_similarity", {})["method"] = self.protocol_template_similarity_method.currentText()
+        pp.setdefault("template_similarity", {})["max_lag_ms"] = self.protocol_template_similarity_max_lag.value()
+        pp.setdefault("template_similarity", {})["support"] = self.protocol_template_similarity_support.currentText()
+        pp.setdefault("template_metrics", {})["include_multi_channel_metrics"] = self.protocol_template_metrics_multi.isChecked()
+        pp.setdefault("template_metrics", {})["peak_sign"] = self.protocol_template_metrics_peak.currentText()
+        pp.setdefault("principal_components", {})["n_components"] = self.protocol_pc_n_components.value()
+        pp.setdefault("principal_components", {})["mode"] = self.protocol_pc_mode.currentText()
+        pp.setdefault("principal_components", {})["whiten"] = self.protocol_pc_whiten.isChecked()
+        pp.setdefault("amplitude_scalings", {})["max_dense_channels"] = self.protocol_amplitude_scalings_max_dense.value()
+        pp.setdefault("amplitude_scalings", {})["delta_collision_ms"] = self.protocol_amplitude_scalings_delta.value()
+        pp.setdefault("amplitude_scalings", {})["handle_collisions"] = self.protocol_amplitude_scalings_handle.isChecked()
         self._save_last_session()
 
     def _get_protocol_form_widgets(self):
@@ -1363,10 +1566,18 @@ class PipelineGUI(QMainWindow):
         widgets = [
             self.preproc_filter_choice_combo,
             self.protocol_unit_locations_method,
-            self.protocol_random_spikes_max, self.protocol_waveforms_ms_before, self.protocol_waveforms_ms_after,
-            self.protocol_correlograms_window, self.protocol_correlograms_bin,
-            self.protocol_spike_amplitudes_peak, self.protocol_template_similarity_method,
-            self.protocol_template_metrics_multi,
+            self.protocol_random_spikes_max, self.protocol_random_spikes_method, self.protocol_random_spikes_seed,
+            self.protocol_waveforms_ms_before, self.protocol_waveforms_ms_after,
+            self.protocol_templates_ms_before, self.protocol_templates_ms_after,
+            self.protocol_correlograms_window, self.protocol_correlograms_bin, self.protocol_correlograms_method,
+            self.protocol_isi_window, self.protocol_isi_bin,
+            self.protocol_spike_amplitudes_peak, self.protocol_spike_locations_method,
+            self.protocol_template_similarity_method, self.protocol_template_similarity_max_lag,
+            self.protocol_template_similarity_support,
+            self.protocol_template_metrics_multi, self.protocol_template_metrics_peak,
+            self.protocol_pc_n_components, self.protocol_pc_mode, self.protocol_pc_whiten,
+            self.protocol_amplitude_scalings_max_dense, self.protocol_amplitude_scalings_delta,
+            self.protocol_amplitude_scalings_handle,
         ]
         widgets.extend(self._preprocessing_step_enabled_widgets.values())
         for step_widgets in self._preproc_step_param_input_widgets.values():
@@ -1396,29 +1607,67 @@ class PipelineGUI(QMainWindow):
                     self._set_preproc_param_widget_value(w, current_vals.get(key, default_val))
 
         self._sync_filter_choice_from_checkboxes()
-        ul = params.get("postprocessing", {}).get("unit_locations", {})
+        active = self._get_active_filter_step()
+        self.preproc_filter_params_container.setVisible(active is not None)
+        pp = params.get("postprocessing", {}) or {}
+        ul = pp.get("unit_locations", {}) or {}
         method = ul.get("method", "center_of_mass") if isinstance(ul, dict) else "center_of_mass"
         idx = self.protocol_unit_locations_method.findText(method)
         if idx >= 0:
             self.protocol_unit_locations_method.setCurrentIndex(idx)
-        rs = params.get("postprocessing", {}).get("random_spikes", {})
+        rs = pp.get("random_spikes", {}) or {}
         self.protocol_random_spikes_max.setValue(int(rs.get("max_spikes_per_unit", 1000)))
-        wf = params.get("postprocessing", {}).get("waveforms", {})
+        idx = self.protocol_random_spikes_method.findText(rs.get("method", "uniform"))
+        if idx >= 0:
+            self.protocol_random_spikes_method.setCurrentIndex(idx)
+        seed_val = rs.get("seed")
+        self.protocol_random_spikes_seed.setValue(-1 if seed_val is None else int(seed_val))
+        wf = pp.get("waveforms", {}) or {}
         self.protocol_waveforms_ms_before.setValue(float(wf.get("ms_before", 1.0)))
         self.protocol_waveforms_ms_after.setValue(float(wf.get("ms_after", 2.0)))
-        cc = params.get("postprocessing", {}).get("correlograms", {})
+        tmpl = pp.get("templates", {}) or {}
+        self.protocol_templates_ms_before.setValue(float(tmpl.get("ms_before", 1.0)))
+        self.protocol_templates_ms_after.setValue(float(tmpl.get("ms_after", 2.0)))
+        cc = pp.get("correlograms", {}) or {}
         self.protocol_correlograms_window.setValue(float(cc.get("window_ms", 50.0)))
         self.protocol_correlograms_bin.setValue(float(cc.get("bin_ms", 1.0)))
-        sa = params.get("postprocessing", {}).get("spike_amplitudes", {})
+        idx = self.protocol_correlograms_method.findText(cc.get("method", "auto"))
+        if idx >= 0:
+            self.protocol_correlograms_method.setCurrentIndex(idx)
+        isi = pp.get("isi_histograms", {}) or {}
+        self.protocol_isi_window.setValue(float(isi.get("window_ms", 50.0)))
+        self.protocol_isi_bin.setValue(float(isi.get("bin_ms", 1.0)))
+        sa = pp.get("spike_amplitudes", {}) or {}
         idx = self.protocol_spike_amplitudes_peak.findText(sa.get("peak_sign", "neg"))
         if idx >= 0:
             self.protocol_spike_amplitudes_peak.setCurrentIndex(idx)
-        ts = params.get("postprocessing", {}).get("template_similarity", {})
-        idx = self.protocol_template_similarity_method.findText(ts.get("method", "cosine_similarity"))
+        sl = pp.get("spike_locations", {}) or {}
+        idx = self.protocol_spike_locations_method.findText(sl.get("method", "center_of_mass"))
+        if idx >= 0:
+            self.protocol_spike_locations_method.setCurrentIndex(idx)
+        ts = pp.get("template_similarity", {}) or {}
+        idx = self.protocol_template_similarity_method.findText(ts.get("method", "cosine"))
         if idx >= 0:
             self.protocol_template_similarity_method.setCurrentIndex(idx)
-        tm = params.get("postprocessing", {}).get("template_metrics", {})
+        self.protocol_template_similarity_max_lag.setValue(float(ts.get("max_lag_ms", 0)))
+        idx = self.protocol_template_similarity_support.findText(ts.get("support", "union"))
+        if idx >= 0:
+            self.protocol_template_similarity_support.setCurrentIndex(idx)
+        tm = pp.get("template_metrics", {}) or {}
         self.protocol_template_metrics_multi.setChecked(bool(tm.get("include_multi_channel_metrics", False)))
+        idx = self.protocol_template_metrics_peak.findText(tm.get("peak_sign", "neg"))
+        if idx >= 0:
+            self.protocol_template_metrics_peak.setCurrentIndex(idx)
+        pc = pp.get("principal_components", {}) or {}
+        self.protocol_pc_n_components.setValue(int(pc.get("n_components", 5)))
+        idx = self.protocol_pc_mode.findText(pc.get("mode", "by_channel_local"))
+        if idx >= 0:
+            self.protocol_pc_mode.setCurrentIndex(idx)
+        self.protocol_pc_whiten.setChecked(bool(pc.get("whiten", True)))
+        asc = pp.get("amplitude_scalings", {}) or {}
+        self.protocol_amplitude_scalings_max_dense.setValue(int(asc.get("max_dense_channels", 16)))
+        self.protocol_amplitude_scalings_delta.setValue(float(asc.get("delta_collision_ms", 2)))
+        self.protocol_amplitude_scalings_handle.setChecked(bool(asc.get("handle_collisions", True)))
         for w in widgets:
             w.blockSignals(False)
 
@@ -1486,38 +1735,36 @@ class PipelineGUI(QMainWindow):
         self._set_sorter_progress(False)
 
     def _request_stop(self):
-        """Stop the pipeline immediately by terminating the subprocess."""
-        if self._pipeline_process and self._pipeline_process.is_alive():
-            self._log("Stopping pipeline immediately...")
-            pid = self._pipeline_process.pid
-            try:
-                # On Windows, kill full process tree to stop sorter children instantly.
-                if os.name == "nt" and pid:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(pid), "/T", "/F"],
-                        capture_output=True,
-                        text=True,
-                        timeout=2.0,
-                    )
-                else:
-                    self._pipeline_process.terminate()
-                    self._pipeline_process.join(timeout=1.0)
-                    if self._pipeline_process.is_alive():
-                        self._pipeline_process.kill()
-                        self._pipeline_process.join(timeout=0.5)
-            except Exception:
-                # Last resort local kill if tree-kill failed.
+        """Stop the pipeline instantly: reset UI immediately, kill process in background."""
+        proc = self._pipeline_process
+        self._pipeline_process = None
+        self._reset_pipeline_state()
+        self._log("Stopping pipeline...")
+        if proc and proc.is_alive():
+            pid = proc.pid
+            # Kill in background so GUI stays responsive
+            def _do_kill():
                 try:
-                    self._pipeline_process.terminate()
-                    self._pipeline_process.join(timeout=0.5)
-                    if self._pipeline_process.is_alive():
-                        self._pipeline_process.kill()
-                        self._pipeline_process.join(timeout=0.5)
+                    if os.name == "nt" and pid:
+                        subprocess.Popen(
+                            ["taskkill", "/PID", str(pid), "/T", "/F"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        proc.terminate()
+                        proc.join(timeout=0.3)
+                        if proc.is_alive():
+                            proc.kill()
+                            proc.join(timeout=0.2)
                 except Exception:
-                    pass
-            self._pipeline_process = None
-            self._reset_pipeline_state()
-            self._log("Pipeline stopped.")
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_do_kill, daemon=True).start()
+        self._log("Pipeline stopped.")
 
     def _set_sorter_progress(self, running):
         self.progress_signal.emit(running)
