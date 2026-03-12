@@ -6,13 +6,45 @@
   "trigger_polarity": "Falling Edge",
   "trigger_min_interval": "5.1",
   "trigger_channel_index": "0",
-  "sorter_name": "tridesclous",
-  "my_probe_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Recordings/20260305/MEA_RdLGN64.json",
+  "sorter_name": "kilosort4",
+  "my_probe_path": "",
   "protocol_params": {
     "preprocessing": {
-      "bandpass_filter": {
-        "freq_min": 400.0,
-        "freq_max": 5000.0
+      "unsigned_to_signed": {},
+      "highpass_spatial_filter": {
+        "n_channel_pad": 60,
+        "n_channel_taper": 29,
+        "apply_agc": false
+      },
+      "common_reference": {
+        "reference": "local",
+        "operator": "median"
+      },
+      "detect_and_remove_bad_channels": {
+        "detect_bad_channels_kwargs": {
+          "method": "std",
+          "std_mad_threshold": 5.0
+        }
+      },
+      "interpolate_bad_channels": {
+        "bad_channel_ids": [],
+        "sigma_um": 36.0,
+        "p": 1.0
+      },
+      "phase_shift": {},
+      "normalize_by_quantile": {
+        "scale": -4.0,
+        "median": 0.0,
+        "q1": 0.05,
+        "q2": 7.95,
+        "mode": "by_channel"
+      },
+      "whiten": {
+        "mode": "global"
+      },
+      "clip": {
+        "a_min": -100.0,
+        "a_max": 100.0
       }
     },
     "postprocessing": {
@@ -201,6 +233,9 @@
         "snippet_T2": 20,
         "snippet_mask_radius": 250,
         "whiten": true
+      },
+      "simple": {
+        "apply_preprocessing": true
       }
     }
   }

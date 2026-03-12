@@ -96,7 +96,7 @@ class PipelineGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SpikeSorting Pipeline Launcher")
-        self.resize(960, 680)
+        self.resize(1020, 720)
         self._session_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui_last_session.json")
 
         # Form field values (we use QLineEdit.text() etc. directly, no StringVar)
@@ -104,45 +104,247 @@ class PipelineGUI(QMainWindow):
         self._current_sorter_name = None
         self._preprocessing_steps_order = [
             "unsigned_to_signed",
+            "astype",
+            "correct_lsb",
+            "depth_order",
             "bandpass_filter",
             "highpass_filter",
             "notch_filter",
             "gaussian_filter",
+            "causal_filter",
+            "highpass_spatial_filter",
+            "filter",
+            "center",
             "common_reference",
             "detect_bad_channels",
+            "detect_and_remove_bad_channels",
+            "detect_and_interpolate_bad_channels",
+            "interpolate_bad_channels",
+            "blank_saturation",
             "phase_shift",
             "rectify",
+            "normalize_by_quantile",
             "zscore",
             "whiten",
+            "scale",
             "clip",
+            "average_across_direction",
+            "directional_derivative",
+            "remove_artifacts",
+            "silence_periods",
             "resample",
+            "correct_motion",
+            "zero_channel_pad",
         ]
-        self._filter_steps = ["bandpass_filter", "highpass_filter", "notch_filter", "gaussian_filter"]
+        self._filter_steps = [
+            "bandpass_filter",
+            "highpass_filter",
+            "notch_filter",
+            "gaussian_filter",
+            "causal_filter",
+            "filter",
+        ]
         self._preprocessing_step_defaults = {
             "unsigned_to_signed": {},
+            "astype": {"dtype": "float32", "round": False},
+            "correct_lsb": {"num_chunks_per_segment": 20, "chunk_size": 10000, "seed": 0, "verbose": False},
+            "depth_order": {"channel_ids": "", "dimensions": "y", "flip": False},
             "bandpass_filter": {"freq_min": 400.0, "freq_max": 5000.0},
             "highpass_filter": {"freq_min": 300.0},
             "notch_filter": {"freq": 50.0, "q": 30.0},
             "gaussian_filter": {"freq_min": 300.0, "freq_max": 6000.0},
+            "causal_filter": {"direction": "forward", "band": "300,6000"},
+            "highpass_spatial_filter": {"n_channel_pad": 60, "n_channel_taper": 30, "apply_agc": False},
+            "filter": {"band": "300,6000", "btype": "bandpass", "filter_order": 5, "ftype": "bessel"},
+            "center": {"mode": "median", "dtype": ""},
             "common_reference": {"reference": "global", "operator": "median"},
             "detect_bad_channels": {"method": "std", "std_mad_threshold": 5.0},
+            "detect_and_remove_bad_channels": {"method": "std", "std_mad_threshold": 5.0},
+            "detect_and_interpolate_bad_channels": {"method": "std", "std_mad_threshold": 5.0},
+            "interpolate_bad_channels": {"bad_channel_ids": "", "sigma_um": 40.0, "p": 1.0},
+            "blank_saturation": {"quantile_threshold": 0.0001, "direction": "both", "fill_value": 0.0},
             "phase_shift": {},
             "rectify": {},
+            "normalize_by_quantile": {"scale": 1.0, "median": 0.0, "q1": 0.05, "q2": 0.95, "mode": "by_channel"},
             "zscore": {"mode": "median+mad"},
             "whiten": {"mode": "global"},
+            "scale": {"gain": 1.0, "offset": 0.0, "dtype": ""},
             "clip": {"a_min": -100.0, "a_max": 100.0},
+            "average_across_direction": {"direction": "y", "dtype": ""},
+            "directional_derivative": {"direction": "y", "order": 1, "edge_order": 1, "dtype": ""},
+            "remove_artifacts": {"ms_before": 0.5, "ms_after": 3.0, "mode": "zeros"},
+            "silence_periods": {"list_periods": "", "mode": "zeros", "seed": 0},
             "resample": {"resample_rate": 20000.0, "margin_ms": 5.0},
+            "correct_motion": {"preset": "nonrigid_accurate", "folder": ""},
+            "zero_channel_pad": {"num_channels": 0, "channel_mapping": ""},
         }
         self._preprocessing_step_param_options = {
+            "astype": {"dtype": ["float32", "float64", "int16", "int32"]},
+            "center": {"mode": ["median", "mean"]},
             "common_reference": {
                 "reference": ["global", "local"],
                 "operator": ["median", "average"],
             },
-            "detect_bad_channels": {
-                "method": ["std", "mad", "coherence+psd"],
-            },
+            "detect_bad_channels": {"method": ["std", "mad", "coherence+psd"]},
+            "detect_and_remove_bad_channels": {"method": ["std", "mad", "coherence+psd"]},
+            "detect_and_interpolate_bad_channels": {"method": ["std", "mad", "coherence+psd"]},
+            "causal_filter": {"direction": ["forward", "backward"]},
+            "filter": {"btype": ["bandpass", "lowpass", "highpass"], "ftype": ["bessel", "butter", "ellip", "cheby1", "cheby2"]},
+            "blank_saturation": {"direction": ["both", "positive", "negative"]},
+            "average_across_direction": {"direction": ["x", "y", "z"]},
+            "directional_derivative": {"direction": ["x", "y", "z"], "order": [1, 2], "edge_order": [1, 2]},
+            "normalize_by_quantile": {"mode": ["by_channel", "pool_channel"]},
+            "remove_artifacts": {"mode": ["zeros", "linear", "cubic", "median", "average"]},
+            "silence_periods": {"mode": ["zeros", "noise"]},
+            "correct_motion": {"preset": ["nonrigid_accurate", "nonrigid_fast", "rigid"]},
             "zscore": {"mode": ["median+mad", "mean+std"]},
             "whiten": {"mode": ["global", "local"]},
+        }
+        self._preprocessing_step_param_tooltips = {
+            "astype": {"dtype": "Output dtype (e.g. float32, int16).", "round": "Round when converting float to int."},
+            "correct_lsb": {
+                "num_chunks_per_segment": "Number of chunks per segment for LSB correction.",
+                "chunk_size": "Chunk size in samples.",
+                "seed": "Random seed.",
+                "verbose": "Verbose output.",
+            },
+            "depth_order": {
+                "channel_ids": "Channel IDs (empty = all). Comma-separated.",
+                "dimensions": "Spatial dimension for ordering (x, y, z).",
+                "flip": "Flip channel order.",
+            },
+            "bandpass_filter": {
+                "freq_min": "Low cutoff frequency (Hz).",
+                "freq_max": "High cutoff frequency (Hz).",
+            },
+            "highpass_filter": {"freq_min": "Low cutoff frequency (Hz)."},
+            "notch_filter": {
+                "freq": "Notch frequency (Hz), e.g. 50 for line noise.",
+                "q": "Quality factor (higher = narrower notch).",
+            },
+            "gaussian_filter": {
+                "freq_min": "Low cutoff frequency (Hz).",
+                "freq_max": "High cutoff frequency (Hz).",
+            },
+            "causal_filter": {
+                "direction": "forward or backward.",
+                "band": "Band as low,high (Hz), e.g. 300,6000.",
+            },
+            "highpass_spatial_filter": {
+                "n_channel_pad": "Number of channels to pad at edges.",
+                "n_channel_taper": "Taper width.",
+                "apply_agc": "Apply automatic gain control.",
+            },
+            "filter": {
+                "band": "Band as low,high (Hz), e.g. 300,6000.",
+                "btype": "bandpass, lowpass, or highpass.",
+                "filter_order": "Filter order.",
+                "ftype": "Filter type (bessel, butter, etc.).",
+            },
+            "center": {"mode": "median or mean.", "dtype": "Output dtype (empty = keep)."},
+            "common_reference": {
+                "reference": "global: all channels; local: nearby channels.",
+                "operator": "median or average for reference signal.",
+            },
+            "detect_bad_channels": {
+                "method": "std, mad, or coherence+psd.",
+                "std_mad_threshold": "Threshold for bad channel detection (MAD units).",
+            },
+            "detect_and_remove_bad_channels": {
+                "method": "std, mad, or coherence+psd.",
+                "std_mad_threshold": "Threshold for bad channel detection (MAD units).",
+            },
+            "detect_and_interpolate_bad_channels": {
+                "method": "std, mad, or coherence+psd.",
+                "std_mad_threshold": "Threshold for bad channel detection (MAD units).",
+            },
+            "interpolate_bad_channels": {
+                "bad_channel_ids": "Comma-separated channel IDs to interpolate.",
+                "sigma_um": "Spatial sigma for interpolation (µm).",
+                "p": "Interpolation order.",
+            },
+            "blank_saturation": {
+                "quantile_threshold": "Quantile for saturation detection.",
+                "direction": "both, positive, or negative.",
+                "fill_value": "Value to fill saturated samples.",
+            },
+            "normalize_by_quantile": {
+                "scale": "Scale factor.",
+                "median": "Median value.",
+                "q1": "Lower quantile.",
+                "q2": "Upper quantile.",
+                "mode": "by_channel or pool_channel.",
+            },
+            "zscore": {"mode": "median+mad or mean+std for normalization."},
+            "whiten": {"mode": "global: all channels; local: within radius_um."},
+            "scale": {"gain": "Gain factor.", "offset": "Offset.", "dtype": "Output dtype (empty = keep)."},
+            "clip": {
+                "a_min": "Minimum value (values below are clipped).",
+                "a_max": "Maximum value (values above are clipped).",
+            },
+            "average_across_direction": {"direction": "Spatial axis (x, y, z).", "dtype": "Output dtype (empty = keep)."},
+            "directional_derivative": {
+                "direction": "Spatial axis.",
+                "order": "Derivative order.",
+                "edge_order": "Edge handling order.",
+                "dtype": "Output dtype (empty = keep).",
+            },
+            "remove_artifacts": {
+                "ms_before": "Milliseconds before trigger to remove.",
+                "ms_after": "Milliseconds after trigger to remove.",
+                "mode": "zeros, linear, cubic, median, or average.",
+            },
+            "silence_periods": {
+                "list_periods": "Format: start1-end1,start2-end2 (frames, per segment). Empty = none.",
+                "mode": "zeros or noise.",
+                "seed": "Random seed for noise mode.",
+            },
+            "resample": {
+                "resample_rate": "Target sampling rate (Hz).",
+                "margin_ms": "Margin for anti-aliasing filter (ms).",
+            },
+            "correct_motion": {
+                "preset": "nonrigid_accurate, nonrigid_fast, or rigid.",
+                "folder": "Folder for motion data (empty = temp).",
+            },
+            "zero_channel_pad": {
+                "num_channels": "Number of zero channels to add.",
+                "channel_mapping": "Optional channel mapping (empty = auto).",
+            },
+        }
+        self._preprocessing_step_tooltips = {
+            "unsigned_to_signed": "Convert unsigned Intan data to signed.",
+            "astype": "Cast traces to a different dtype (e.g. float32).",
+            "correct_lsb": "Correct least significant bit errors in the data.",
+            "depth_order": "Reorder channels by depth (requires probe with locations).",
+            "bandpass_filter": "Bandpass filter: keep frequencies between freq_min and freq_max.",
+            "highpass_filter": "Highpass filter: remove low frequencies below freq_min.",
+            "notch_filter": "Notch filter: remove line noise (e.g. 50 Hz).",
+            "gaussian_filter": "Gaussian filter: smooth frequency response.",
+            "causal_filter": "Causal (one-direction) bandpass filter.",
+            "highpass_spatial_filter": "IBL-style highpass filter along channel depth (destriping).",
+            "filter": "Generic filter with band, btype, ftype options.",
+            "center": "Center traces (subtract median or mean).",
+            "common_reference": "Subtract common reference (global or local) from all channels.",
+            "detect_bad_channels": "Detect and remove bad channels before sorting.",
+            "detect_and_remove_bad_channels": "Detect bad channels and remove them (single step).",
+            "detect_and_interpolate_bad_channels": "Detect bad channels and interpolate them (single step).",
+            "interpolate_bad_channels": "Interpolate specified bad channels (requires bad_channel_ids).",
+            "blank_saturation": "Blank saturated samples (auto-detect via quantiles).",
+            "phase_shift": "Apply phase shift to correct filter delay.",
+            "rectify": "Full-wave rectification of the signal.",
+            "normalize_by_quantile": "Normalize by quantile scaling.",
+            "zscore": "Z-score normalization (median+mad or mean+std).",
+            "whiten": "Whiten signals to decorrelate channels.",
+            "scale": "Apply gain and offset to traces.",
+            "clip": "Clip signal values to [a_min, a_max] range.",
+            "average_across_direction": "Average traces across a spatial direction.",
+            "directional_derivative": "Compute derivative along a spatial axis.",
+            "remove_artifacts": "Remove artifacts around trigger times (list_triggers from pipeline).",
+            "silence_periods": "Replace specified periods with zeros or noise.",
+            "resample": "Resample recording to target sampling rate.",
+            "correct_motion": "Motion/drift correction (requires probe).",
+            "zero_channel_pad": "Pad recording with zero-filled channels.",
         }
         self._preprocessing_step_enabled_widgets = {}
         self._preproc_step_params_widgets = {}
@@ -370,23 +572,34 @@ class PipelineGUI(QMainWindow):
             "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
         )
         preprocessing_main = QVBoxLayout(preprocessing_group)
-        preprocessing_main.setSpacing(8)
-        preprocessing_main.setContentsMargins(12, 16, 12, 12)
+        preprocessing_main.setSpacing(6)
+        preprocessing_main.setContentsMargins(12, 14, 12, 10)
 
-        # Filter block: compact row
+        # Filter block: choose one temporal filter
         filter_frame = QFrame()
         filter_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        filter_frame.setStyleSheet("QFrame { background-color: palette(base); border-radius: 4px; }")
+        filter_frame.setStyleSheet(
+            "QFrame { background-color: palette(base); border-radius: 4px; border: 1px solid palette(mid); }"
+        )
         filter_layout = QHBoxLayout(filter_frame)
         filter_layout.setContentsMargins(10, 8, 10, 8)
         filter_layout.setSpacing(12)
         filter_layout.addWidget(QLabel("Filter:"))
+        filter_layout.addWidget(self._make_info_badge("Choose one temporal filter. None = no filtering."))
         self.preproc_filter_choice_combo = QComboBox()
         self.preproc_filter_choice_combo.addItems(
-            ["None", "bandpass_filter", "highpass_filter", "notch_filter", "gaussian_filter"]
+            [
+                "None",
+                "bandpass_filter",
+                "highpass_filter",
+                "notch_filter",
+                "gaussian_filter",
+                "causal_filter",
+                "filter",
+            ]
         )
         self.preproc_filter_choice_combo.currentTextChanged.connect(self._on_filter_choice_changed)
-        self.preproc_filter_choice_combo.setMinimumWidth(140)
+        self.preproc_filter_choice_combo.setMinimumWidth(160)
         self.preproc_filter_choice_combo.setStyleSheet(
             "QComboBox { background-color: #ffffff; } "
             "QComboBox QAbstractItemView { background-color: #ffffff; }"
@@ -400,10 +613,13 @@ class PipelineGUI(QMainWindow):
         filter_layout.addStretch()
         preprocessing_main.addWidget(filter_frame)
 
-        # Steps block: compact list
+        # Steps block: single column inside scroll area
         steps_frame = QFrame()
         steps_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        steps_frame.setStyleSheet("QFrame { background-color: palette(base); border-radius: 4px; }")
+        steps_frame.setStyleSheet(
+            "QFrame { background-color: palette(base); border-radius: 4px; border: 1px solid palette(mid); } "
+            "QFrame > QWidget { background: transparent; }"
+        )
         self.preproc_steps_layout = QVBoxLayout(steps_frame)
         self.preproc_steps_layout.setContentsMargins(10, 8, 10, 8)
         self.preproc_steps_layout.setSpacing(6)
@@ -417,16 +633,33 @@ class PipelineGUI(QMainWindow):
             panel, param_widgets = self._create_preproc_step_panel(step_name)
             self._preproc_step_param_input_widgets[step_name] = param_widgets
             self._preproc_step_params_widgets[step_name] = panel
-            step_row = QHBoxLayout()
-            step_row.setSpacing(8)
+            step_container = QWidget()
+            step_container_layout = QVBoxLayout(step_container)
+            step_container_layout.setContentsMargins(0, 4, 0, 4)
+            step_container_layout.setSpacing(4)
+            header_row = QHBoxLayout()
+            header_row.setSpacing(8)
             cb = QCheckBox(step_name.replace("_", " "))
             cb.toggled.connect(lambda checked, s=step_name: self._on_preproc_step_toggled(s, checked))
             self._preprocessing_step_enabled_widgets[step_name] = cb
-            step_row.addWidget(cb)
-            step_row.addWidget(panel, 1)
-            step_row.addStretch()
-            self.preproc_steps_layout.addLayout(step_row)
-        preprocessing_main.addWidget(steps_frame)
+            header_row.addWidget(cb)
+            step_tip = self._preprocessing_step_tooltips.get(step_name)
+            if step_tip:
+                header_row.addWidget(self._make_info_badge(step_tip))
+            header_row.addStretch()
+            step_container_layout.addLayout(header_row)
+            step_container_layout.addWidget(panel)
+            self.preproc_steps_layout.addWidget(step_container)
+        preproc_scroll = QScrollArea()
+        preproc_scroll.setWidget(steps_frame)
+        preproc_scroll.setWidgetResizable(True)
+        preproc_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        preproc_scroll.setMinimumHeight(380)
+        preproc_scroll.setMaximumHeight(550)
+        preproc_scroll.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        preproc_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        preproc_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        preprocessing_main.addWidget(preproc_scroll)
 
         protocol_main.addWidget(preprocessing_group)
 
@@ -457,7 +690,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_waveforms_ms_before.setSingleStep(0.1)
         self.protocol_waveforms_ms_before.setMaximumWidth(120)
         self.protocol_waveforms_ms_before.valueChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_wf, r, "Waveforms ms_before:", self.protocol_waveforms_ms_before, "Window before peak (ms)")
+        _add_row(grid_wf, r, "Waveforms ms_before:", self.protocol_waveforms_ms_before, "Waveform window before spike peak (ms).")
         r += 1
         self.protocol_waveforms_ms_after = QDoubleSpinBox()
         self.protocol_waveforms_ms_after.setRange(0.1, 10)
@@ -465,7 +698,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_waveforms_ms_after.setSingleStep(0.1)
         self.protocol_waveforms_ms_after.setMaximumWidth(120)
         self.protocol_waveforms_ms_after.valueChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_wf, r, "Waveforms ms_after:", self.protocol_waveforms_ms_after, "Window after peak (ms)")
+        _add_row(grid_wf, r, "Waveforms ms_after:", self.protocol_waveforms_ms_after, "Waveform window after spike peak (ms).")
         r += 1
         self.protocol_templates_ms_before = QDoubleSpinBox()
         self.protocol_templates_ms_before.setRange(0.1, 10)
@@ -473,7 +706,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_templates_ms_before.setSingleStep(0.1)
         self.protocol_templates_ms_before.setMaximumWidth(120)
         self.protocol_templates_ms_before.valueChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_wf, r, "Templates ms_before:", self.protocol_templates_ms_before, "Window before peak (ms)")
+        _add_row(grid_wf, r, "Templates ms_before:", self.protocol_templates_ms_before, "Template window before spike peak (ms).")
         r += 1
         self.protocol_templates_ms_after = QDoubleSpinBox()
         self.protocol_templates_ms_after.setRange(0.1, 10)
@@ -481,7 +714,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_templates_ms_after.setSingleStep(0.1)
         self.protocol_templates_ms_after.setMaximumWidth(120)
         self.protocol_templates_ms_after.valueChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_wf, r, "Templates ms_after:", self.protocol_templates_ms_after, "Window after peak (ms)")
+        _add_row(grid_wf, r, "Templates ms_after:", self.protocol_templates_ms_after, "Template window after spike peak (ms).")
         r += 1
         self.protocol_spike_amplitudes_peak = QComboBox()
         self.protocol_spike_amplitudes_peak.addItems(["neg", "pos"])
@@ -500,26 +733,26 @@ class PipelineGUI(QMainWindow):
         self.protocol_unit_locations_method.addItems(["center_of_mass", "monopolar_triangulation"])
         self.protocol_unit_locations_method.setMaximumWidth(180)
         self.protocol_unit_locations_method.currentTextChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_loc, r, "Unit locations method:", self.protocol_unit_locations_method, "Method")
+        _add_row(grid_loc, r, "Unit locations method:", self.protocol_unit_locations_method, "center_of_mass or monopolar_triangulation to estimate unit positions.")
         r += 1
         self.protocol_spike_locations_method = QComboBox()
         self.protocol_spike_locations_method.addItems(["center_of_mass", "monopolar_triangulation"])
         self.protocol_spike_locations_method.setMaximumWidth(180)
         self.protocol_spike_locations_method.currentTextChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_loc, r, "Spike locations method:", self.protocol_spike_locations_method, "Method")
+        _add_row(grid_loc, r, "Spike locations method:", self.protocol_spike_locations_method, "Method to estimate spike location per spike.")
         r += 1
         self.protocol_random_spikes_max = QSpinBox()
         self.protocol_random_spikes_max.setRange(1, 10000)
         self.protocol_random_spikes_max.setValue(1000)
         self.protocol_random_spikes_max.setMaximumWidth(120)
         self.protocol_random_spikes_max.valueChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_loc, r, "Random spikes max_per_unit:", self.protocol_random_spikes_max, "Max spikes")
+        _add_row(grid_loc, r, "Random spikes max_per_unit:", self.protocol_random_spikes_max, "Max random spikes to sample per unit (for waveforms, etc.).")
         r += 1
         self.protocol_random_spikes_method = QComboBox()
         self.protocol_random_spikes_method.addItems(["uniform", "all"])
         self.protocol_random_spikes_method.setMaximumWidth(120)
         self.protocol_random_spikes_method.currentTextChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_loc, r, "Random spikes method:", self.protocol_random_spikes_method, "uniform | all")
+        _add_row(grid_loc, r, "Random spikes method:", self.protocol_random_spikes_method, "uniform: random sampling; all: use all spikes (slower).")
         r += 1
         self.protocol_random_spikes_seed = QSpinBox()
         self.protocol_random_spikes_seed.setRange(-1, 999999)
@@ -527,7 +760,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_random_spikes_seed.setValue(-1)
         self.protocol_random_spikes_seed.setMaximumWidth(120)
         self.protocol_random_spikes_seed.valueChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_loc, r, "Random spikes seed:", self.protocol_random_spikes_seed, "-1 = None")
+        _add_row(grid_loc, r, "Random spikes seed:", self.protocol_random_spikes_seed, "Seed for reproducibility. -1 = None (random each run).")
         self._postproc_tabs.addTab(tab_loc, "Locations & Sampling")
 
         # Tab 3: Correlograms & ISI
@@ -555,7 +788,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_correlograms_method.addItems(["auto", "numpy"])
         self.protocol_correlograms_method.setMaximumWidth(120)
         self.protocol_correlograms_method.currentTextChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_cc, r, "Correlograms method:", self.protocol_correlograms_method, "auto | numpy")
+        _add_row(grid_cc, r, "Correlograms method:", self.protocol_correlograms_method, "auto: choose best; numpy: pure numpy implementation.")
         r += 1
         self.protocol_isi_window = QDoubleSpinBox()
         self.protocol_isi_window.setRange(1, 500)
@@ -583,7 +816,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_template_similarity_method.addItems(["cosine", "l2"])
         self.protocol_template_similarity_method.setMaximumWidth(180)
         self.protocol_template_similarity_method.currentTextChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_metrics, r, "Template similarity method:", self.protocol_template_similarity_method, "cosine | l2")
+        _add_row(grid_metrics, r, "Template similarity method:", self.protocol_template_similarity_method, "cosine: cosine similarity; l2: L2 distance.")
         r += 1
         self.protocol_template_similarity_max_lag = QDoubleSpinBox()
         self.protocol_template_similarity_max_lag.setRange(0, 100)
@@ -596,18 +829,18 @@ class PipelineGUI(QMainWindow):
         self.protocol_template_similarity_support.addItems(["union", "min"])
         self.protocol_template_similarity_support.setMaximumWidth(120)
         self.protocol_template_similarity_support.currentTextChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_metrics, r, "Template similarity support:", self.protocol_template_similarity_support, "union | min")
+        _add_row(grid_metrics, r, "Template similarity support:", self.protocol_template_similarity_support, "union: all channels; min: minimum common channels.")
         r += 1
         self.protocol_template_metrics_multi = QCheckBox("Include multi-channel metrics")
         self.protocol_template_metrics_multi.setChecked(False)
         self.protocol_template_metrics_multi.toggled.connect(self._update_protocol_from_form)
-        _add_row(grid_metrics, r, "Template metrics:", self.protocol_template_metrics_multi, "")
+        _add_row(grid_metrics, r, "Template metrics:", self.protocol_template_metrics_multi, "Include multi-channel template metrics (e.g. from neighboring channels).")
         r += 1
         self.protocol_template_metrics_peak = QComboBox()
         self.protocol_template_metrics_peak.addItems(["neg", "pos"])
         self.protocol_template_metrics_peak.setMaximumWidth(120)
         self.protocol_template_metrics_peak.currentTextChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_metrics, r, "Template metrics peak_sign:", self.protocol_template_metrics_peak, "neg | pos")
+        _add_row(grid_metrics, r, "Template metrics peak_sign:", self.protocol_template_metrics_peak, "Peak sign for template metrics: neg or pos.")
         r += 1
         self.protocol_pc_n_components = QSpinBox()
         self.protocol_pc_n_components.setRange(1, 20)
@@ -625,7 +858,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_pc_whiten = QCheckBox("Whiten")
         self.protocol_pc_whiten.setChecked(True)
         self.protocol_pc_whiten.toggled.connect(self._update_protocol_from_form)
-        _add_row(grid_metrics, r, "PC whiten:", self.protocol_pc_whiten, "")
+        _add_row(grid_metrics, r, "PC whiten:", self.protocol_pc_whiten, "Whiten principal components to unit variance.")
         self._postproc_tabs.addTab(tab_metrics, "Template & PC")
 
         # Tab 5: Amplitude scalings
@@ -639,7 +872,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_amplitude_scalings_max_dense.setValue(16)
         self.protocol_amplitude_scalings_max_dense.setMaximumWidth(120)
         self.protocol_amplitude_scalings_max_dense.valueChanged.connect(self._update_protocol_from_form)
-        _add_row(grid_amp, r, "max_dense_channels:", self.protocol_amplitude_scalings_max_dense, "Max channels")
+        _add_row(grid_amp, r, "max_dense_channels:", self.protocol_amplitude_scalings_max_dense, "Max dense channels for amplitude scaling computation.")
         r += 1
         self.protocol_amplitude_scalings_delta = QDoubleSpinBox()
         self.protocol_amplitude_scalings_delta.setRange(0.1, 20)
@@ -651,7 +884,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_amplitude_scalings_handle = QCheckBox("Handle collisions")
         self.protocol_amplitude_scalings_handle.setChecked(True)
         self.protocol_amplitude_scalings_handle.toggled.connect(self._update_protocol_from_form)
-        _add_row(grid_amp, r, "handle_collisions:", self.protocol_amplitude_scalings_handle, "")
+        _add_row(grid_amp, r, "handle_collisions:", self.protocol_amplitude_scalings_handle, "Handle overlapping spikes when computing amplitude scalings.")
         self._postproc_tabs.addTab(tab_amp, "Amplitude scalings")
 
         postprocessing_main.addWidget(self._postproc_tabs)
@@ -699,7 +932,9 @@ class PipelineGUI(QMainWindow):
         left_top_layout = QHBoxLayout(left_top)
         left_top_layout.setContentsMargins(0, 0, 0, 0)
         left_top_layout.setSpacing(12)
-        left_top_layout.addWidget(left_widget, 1)
+        left_widget.setMaximumWidth(720)
+        left_top_layout.addWidget(left_widget)
+        protocol_container.setMinimumWidth(420)
         left_top_layout.addWidget(protocol_container, 1)
 
         left_panel = QWidget()
@@ -740,7 +975,7 @@ class PipelineGUI(QMainWindow):
         self.logs.setMinimumHeight(200)
         left_panel_layout.addWidget(self.logs, 1)
 
-        content.addWidget(left_panel, 2)
+        content.addWidget(left_panel, 3)
         content.addWidget(right_column, 1)
         self._apply_protocol_to_form(self._protocol_params)  # Apply default protocol to dynamic form
         self._update_protocol_from_form()  # Sync initial form values to dict
@@ -1098,6 +1333,9 @@ class PipelineGUI(QMainWindow):
             self._mea_editor_window._force_close = True
             self._mea_editor_window.close()
             self._mea_editor_window = None
+        if self._pipeline_process is not None and self._pipeline_process.is_alive():
+            self._pipeline_process.terminate()
+            self._pipeline_process.join(timeout=2.0)
         self._save_last_session(immediate=True)
         event.accept()
 
@@ -1342,30 +1580,40 @@ class PipelineGUI(QMainWindow):
         """Create a compact panel with param widgets. Returns (panel, param_widgets_dict)."""
         panel = QWidget()
         defaults = self._preprocessing_step_defaults.get(step_name, {})
+        tooltips = self._preprocessing_step_param_tooltips.get(step_name, {})
+        step_tooltips = self._preprocessing_step_tooltips.get(step_name, "")
         is_filter = step_name in self._filter_steps
         param_widgets = {}
         if is_filter:
             layout = QHBoxLayout(panel)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(8)
+            if step_tooltips:
+                layout.addWidget(self._make_info_badge(step_tooltips))
             for key, default_val in defaults.items():
                 layout.addWidget(QLabel(key + ":"))
                 w = self._create_preproc_param_widget(step_name, key, default_val)
-                w.setMaximumWidth(90)
+                w.setMaximumWidth(120)
                 param_widgets[key] = w
                 layout.addWidget(w)
+                tip = tooltips.get(key)
+                if tip:
+                    layout.addWidget(self._make_info_badge(tip))
             layout.addStretch()
         else:
-            layout = QHBoxLayout(panel)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            for key, default_val in defaults.items():
-                layout.addWidget(QLabel(key + ":"))
+            layout = QGridLayout(panel)
+            layout.setContentsMargins(8, 4, 0, 4)
+            layout.setSpacing(4)
+            layout.setColumnStretch(1, 1)
+            for row, (key, default_val) in enumerate(defaults.items()):
+                layout.addWidget(QLabel(key + ":"), row, 0)
                 w = self._create_preproc_param_widget(step_name, key, default_val)
-                w.setMaximumWidth(100)
+                w.setMaximumWidth(180)
                 param_widgets[key] = w
-                layout.addWidget(w)
-            layout.addStretch()
+                layout.addWidget(w, row, 1)
+                tip = tooltips.get(key)
+                if tip:
+                    layout.addWidget(self._make_info_badge(tip), row, 2)
         panel.setVisible(False)
         return panel, param_widgets
 
@@ -1400,6 +1648,86 @@ class PipelineGUI(QMainWindow):
         w = QLineEdit(str(default_val))
         w.textChanged.connect(self._update_protocol_from_form)
         return w
+
+    def _normalize_preprocessing_step_params(self, step_name, values):
+        """Convert GUI values to protocol/SI format (lists, None, detect_bad_channels_kwargs, etc.)."""
+        out = dict(values)
+        if step_name in ("filter", "causal_filter") and "band" in out:
+            raw = out.get("band", "")
+            if isinstance(raw, str):
+                try:
+                    parts = [float(x.strip()) for x in raw.split(",") if x.strip()]
+                    out["band"] = parts if len(parts) >= 2 else [300.0, 6000.0]
+                except ValueError:
+                    out["band"] = [300.0, 6000.0]
+        elif step_name in ("detect_and_remove_bad_channels", "detect_and_interpolate_bad_channels"):
+            kwargs = {"method": out.get("method", "std"), "std_mad_threshold": out.get("std_mad_threshold", 5.0)}
+            out["detect_bad_channels_kwargs"] = kwargs
+            out.pop("method", None)
+            out.pop("std_mad_threshold", None)
+        elif step_name == "interpolate_bad_channels" and "bad_channel_ids" in out:
+            raw = out.get("bad_channel_ids", "")
+            if isinstance(raw, str) and raw.strip():
+                ids = [x.strip() for x in raw.split(",") if x.strip()]
+                out["bad_channel_ids"] = [int(i) if i.isdigit() else i for i in ids]
+            else:
+                out["bad_channel_ids"] = []
+        elif step_name == "depth_order" and "channel_ids" in out:
+            raw = out.get("channel_ids", "")
+            if isinstance(raw, str) and raw.strip():
+                out["channel_ids"] = [x.strip() for x in raw.split(",") if x.strip()]
+            else:
+                out.pop("channel_ids", None)
+        elif step_name == "silence_periods":
+            raw = out.get("list_periods", "")
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    periods = []
+                    for part in raw.split(","):
+                        part = part.strip()
+                        if "-" in part:
+                            a, b = part.split("-", 1)
+                            periods.append((int(a.strip()), int(b.strip())))
+                    out["list_periods"] = [periods] if periods else [[]]
+                except (ValueError, TypeError):
+                    out["list_periods"] = [[]]
+            else:
+                out["list_periods"] = [[]]
+        for key in ("dtype", "folder"):
+            if key in out and out[key] == "":
+                out[key] = None
+        return out
+
+    def _denormalize_preproc_param_for_widget(self, step_name, key, current_vals, default_val):
+        """Convert protocol values back to widget display format."""
+        val = current_vals.get(key, default_val)
+        if step_name in ("detect_and_remove_bad_channels", "detect_and_interpolate_bad_channels"):
+            if key == "method":
+                kwargs = current_vals.get("detect_bad_channels_kwargs", {})
+                return kwargs.get("method", default_val)
+            if key == "std_mad_threshold":
+                kwargs = current_vals.get("detect_bad_channels_kwargs", {})
+                return kwargs.get("std_mad_threshold", default_val)
+        if step_name in ("filter", "causal_filter") and key == "band":
+            if isinstance(val, (list, tuple)) and len(val) >= 2:
+                return ",".join(str(x) for x in val[:2])
+            return str(default_val) if isinstance(default_val, str) else "300,6000"
+        if step_name == "interpolate_bad_channels" and key == "bad_channel_ids":
+            if isinstance(val, (list, tuple)):
+                return ",".join(str(x) for x in val)
+            return str(val) if val else ""
+        if step_name == "depth_order" and key == "channel_ids":
+            if isinstance(val, (list, tuple)):
+                return ",".join(str(x) for x in val)
+            return str(val) if val else ""
+        if step_name == "silence_periods" and key == "list_periods":
+            if isinstance(val, (list, tuple)) and val and isinstance(val[0], (list, tuple)):
+                periods = val[0]
+                return ",".join(f"{a}-{b}" for (a, b) in periods)
+            return ""
+        if val is None and key in ("dtype", "folder"):
+            return ""
+        return val
 
     def _get_preproc_param_widget_value(self, widget, default_val):
         if isinstance(widget, QComboBox):
@@ -1453,7 +1781,10 @@ class PipelineGUI(QMainWindow):
             except Exception:
                 pass
         elif isinstance(widget, QLineEdit):
-            widget.setText(str(value))
+            if isinstance(value, (list, tuple)):
+                widget.setText(",".join(str(x) for x in value))
+            else:
+                widget.setText(str(value) if value is not None else "")
 
     def _set_preproc_step_enabled(self, step_name, enabled):
         """Set one preprocessing step checkbox/panel without emitting its toggled signal."""
@@ -1475,7 +1806,6 @@ class PipelineGUI(QMainWindow):
     def _set_filter_steps_exclusive(self, selected_filter):
         for step_name in self._filter_steps:
             self._set_preproc_step_enabled(step_name, step_name == selected_filter)
-        # Hide the entire filter params container when no filter is selected
         self.preproc_filter_params_container.setVisible(selected_filter is not None)
 
     def _sync_filter_choice_from_checkboxes(self):
@@ -1490,7 +1820,6 @@ class PipelineGUI(QMainWindow):
         self.preproc_filter_choice_combo.blockSignals(False)
 
     def _on_preproc_step_toggled(self, step_name, checked):
-        # Non-filter steps are controlled by checkboxes.
         self._set_preproc_step_enabled(step_name, checked)
         self._update_protocol_from_form()
 
@@ -1519,6 +1848,7 @@ class PipelineGUI(QMainWindow):
                 w = self._preproc_step_param_input_widgets.get(step_name, {}).get(key)
                 if w is not None:
                     values[key] = self._get_preproc_param_widget_value(w, default_val)
+            values = self._normalize_preprocessing_step_params(step_name, values)
             preprocessing[step_name] = values
 
         # Preserve preprocessing steps that are not represented by current GUI controls.
@@ -1604,7 +1934,10 @@ class PipelineGUI(QMainWindow):
             for key, default_val in defaults.items():
                 w = self._preproc_step_param_input_widgets.get(step_name, {}).get(key)
                 if w is not None:
-                    self._set_preproc_param_widget_value(w, current_vals.get(key, default_val))
+                    display_val = self._denormalize_preproc_param_for_widget(
+                        step_name, key, current_vals, default_val
+                    )
+                    self._set_preproc_param_widget_value(w, display_val)
 
         self._sync_filter_choice_from_checkboxes()
         active = self._get_active_filter_step()
@@ -1896,7 +2229,7 @@ class PipelineGUI(QMainWindow):
         self._pipeline_process = multiprocessing.Process(
             target=run_pipeline_in_process,
             args=(params, self._log_queue),
-            daemon=True,
+            daemon=False,
         )
         self._pipeline_process.start()
         # Thread to read queue and emit Qt signals (GUI updates must be on main thread)
@@ -1910,6 +2243,7 @@ class PipelineGUI(QMainWindow):
         """
         try:
             self._update_sorter_params_from_form()
+            self._update_protocol_from_form()
             folder_path = self.folder_edit.text().strip()
             use_trigger = self.use_trigger_cb.isChecked()
             sorter_name = self.sorter_combo.currentText().strip()

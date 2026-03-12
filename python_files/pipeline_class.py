@@ -12,6 +12,17 @@ import spikeinterface.sorters as ss
 import spikeinterface.curation as scur
 import spikeinterface.preprocessing as spre
 import spikeinterface as si
+from spikeinterface.core.job_tools import fix_job_kwargs, get_best_job_kwargs
+
+
+def _get_pipeline_job_kwargs():
+    """Job kwargs for pipeline: native get_best_job_kwargs + overrides."""
+    try:
+        job_kwargs = get_best_job_kwargs()
+        job_kwargs.update(chunk_memory="100M", progress_bar=True)
+        return job_kwargs
+    except Exception:
+        return {"n_jobs": -1, "chunk_memory": "100M", "progress_bar": True}
 
 
 def _sanitize_sorter_params(sorter_name, params):
@@ -76,19 +87,35 @@ class Pipeline:
         self._output_analyzer_folder = os.path.join(folder_path, f"Analyzer_binary_pipeline_{sorter.name}")
         # Update preprocessing settings, then run the full pipeline immediately.
         self.__remove_artifacts()
+        self.__apply_job_kwargs()
         self.__pipeline_sorter_analyzer()
     
+    def __apply_job_kwargs(self):
+        """Apply job_kwargs using SpikeInterface's get_best_job_kwargs()."""
+        try:
+            job_kwargs = fix_job_kwargs(_get_pipeline_job_kwargs())
+            si.set_global_job_kwargs(**job_kwargs)
+        except Exception:
+            pass
+
     def __remove_artifacts(self):
         """
         Add artifact-removal preprocessing when trigger timestamps are available.
 
-        The artifacts are replaced by zeros around trigger events, based on
-        current protocol conventions.
+        Merges list_triggers from recording with user-configured params (ms_before,
+        ms_after, mode) from the protocol.
         """
         if len(self._rhs_files.trigger_timestamps) != 0:
-                self._protocol_params['preprocessing']['remove_artifacts'] = {
-                                                        "list_triggers": self._rhs_files.trigger_timestamps,
-                                                        "mode": "zeros"}
+            existing = self._protocol_params.get("preprocessing", {}).get("remove_artifacts", {})
+            if not isinstance(existing, dict):
+                existing = {}
+            self._protocol_params.setdefault("preprocessing", {})["remove_artifacts"] = {
+                "list_triggers": self._rhs_files.trigger_timestamps,
+                "mode": existing.get("mode", "zeros"),
+                "ms_before": existing.get("ms_before", 0.5),
+                "ms_after": existing.get("ms_after", 3.0),
+                **{k: v for k, v in existing.items() if k not in ("list_triggers", "mode", "ms_before", "ms_after")},
+            }
 
     def __pipeline_sorter_analyzer (self):
         """
@@ -96,9 +123,15 @@ class Pipeline:
         """
         # 1) Apply preprocessing and keep a single local recording object.
         # `detect_bad_channels` is not a recording preprocessor in SI pipeline;
-        # handle it explicitly around apply_preprocessing_pipeline.
+        # handle it explicitly around apply_preprocessing_pipeline. Skip if
+        # detect_and_remove_bad_channels or detect_and_interpolate_bad_channels
+        # is used (they handle detection in-pipeline).
         preprocessing_params = copy.deepcopy(self._protocol_params["preprocessing"])
-        detect_bad_cfg = preprocessing_params.pop("detect_bad_channels", None)
+        has_detect_and_remove = "detect_and_remove_bad_channels" in preprocessing_params
+        has_detect_and_interpolate = "detect_and_interpolate_bad_channels" in preprocessing_params
+        detect_bad_cfg = None
+        if not (has_detect_and_remove or has_detect_and_interpolate):
+            detect_bad_cfg = preprocessing_params.pop("detect_bad_channels", None)
         input_rec = self._rhs_files._amplifier_channel_recording
 
         # Safety: always run unsigned_to_signed first when configured.
@@ -110,6 +143,10 @@ class Pipeline:
                     continue
                 ordered_pre[key] = value
             preprocessing_params = ordered_pre
+
+        # Skip steps with invalid params (e.g. zero_channel_pad with num_channels=0)
+        if preprocessing_params.get("zero_channel_pad", {}).get("num_channels", 1) == 0:
+            preprocessing_params = {k: v for k, v in preprocessing_params.items() if k != "zero_channel_pad"}
 
         rec = spre.apply_preprocessing_pipeline(
             input_rec,
@@ -127,8 +164,15 @@ class Pipeline:
         self._rhs_files._pre_processed_recording = rec
 
         # 3) Run sorter with the same recording object.
-        sorter_params = self._protocol_params.get("sorter_params", {}).get(self._sorter.name, {})
+        sorter_params = copy.deepcopy(self._protocol_params.get("sorter_params", {}).get(self._sorter.name, {}))
         sorter_params = _sanitize_sorter_params(self._sorter.name, sorter_params)
+        job_kwargs = _get_pipeline_job_kwargs()
+        try:
+            default_params = ss.get_default_sorter_params(self._sorter.name)
+            if "job_kwargs" in default_params:
+                sorter_params.setdefault("job_kwargs", {}).update(job_kwargs)
+        except Exception:
+            pass
         sorting_results = ss.run_sorter(
             sorter_name=self._sorter.name,
             recording=rec,
@@ -155,5 +199,6 @@ class Pipeline:
                 ) from exc
             raise
         # 6) Compute postprocessing extensions and keep analyzer for plotting/PDF.
-        analyzer_result.compute(self._protocol_params['postprocessing'])
+        job_kwargs = _get_pipeline_job_kwargs()
+        analyzer_result.compute(self._protocol_params['postprocessing'], **job_kwargs)
         self._rhs_files._computed_analyzer_result = analyzer_result
