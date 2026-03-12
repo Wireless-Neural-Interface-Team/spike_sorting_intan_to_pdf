@@ -18,9 +18,9 @@ import os
 import json
 import time
 import copy
+from datetime import datetime
 import ctypes
 import threading
-import traceback
 import multiprocessing
 from queue import Empty
 from collections import defaultdict
@@ -51,38 +51,36 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QDoubleSpinBox,
     QSpinBox,
-    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QHeaderView,
+    QScrollArea,
+    QFrame,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtGui import QAction
 
-from trigger_class import Trigger
-from timestamps_class import TimestampsParameters
-from sorter_class import Sorter
 from protocol_class import default_protocol_params
-from intan_class import IntanFile, load_channel_ids_only
-from probe_class import Probe
-from pipeline_class import Pipeline
-from pdf_generator_class import PDFGenerator
+from gui_components import (
+    ChannelsLoaderWorker,
+    EmbeddedMEAEditor,
+    MEA_EDITOR_AVAILABLE,
+    save_electrodes_to_file,
+)
+from gui_pipeline_runner import run_pipeline_in_process, is_file_in_use_error
 
-
-class _ChannelsLoaderWorker(QObject):
-    """Worker that loads channel IDs in a background thread."""
-    finished = Signal(str, object)  # (folder_path, channel_ids or None)
-
-    def __init__(self, folder_path):
-        super().__init__()
-        self._folder_path = folder_path
-
-    def run(self):
-        try:
-            ch_ids = load_channel_ids_only(self._folder_path)
-            self.finished.emit(self._folder_path, ch_ids)
-        except Exception:
-            self.finished.emit(self._folder_path, None)
+try:
+    from spikeinterface.sorters import (
+        available_sorters,
+        get_default_sorter_params,
+        get_sorter_params_description,
+    )
+    SORTERS_AVAILABLE = True
+except ImportError:
+    SORTERS_AVAILABLE = False
+    available_sorters = lambda: ["tridesclous2"]
+    get_default_sorter_params = lambda n: {}
+    get_sorter_params_description = lambda n: {}
 
 
 class PipelineGUI(QMainWindow):
@@ -99,9 +97,16 @@ class PipelineGUI(QMainWindow):
 
         # Form field values (we use QLineEdit.text() etc. directly, no StringVar)
         self._trigger_widgets = []
+        self._current_sorter_name = None
         self._channels_load_thread = None
         self._channels_load_worker = None
         self._channels_debounce_timer = None
+        self._save_debounce_timer = None
+        self._mea_editor_window = None
+        self._probe_temp_path = None
+        self._last_probe_from_mea_editor = False
+        self._mea_editor_sync_timer = None
+        self._probe_path = ""
         self._stop_requested = False
         # Pipeline runs in a subprocess for immediate stop capability
         self._pipeline_process = None  # multiprocessing.Process instance
@@ -112,6 +117,23 @@ class PipelineGUI(QMainWindow):
         self.pipeline_done_signal.connect(self._on_pipeline_done)
         self._build_ui()
         self._load_last_session()
+
+    def _make_info_badge(self, tooltip_text):
+        """Small blue 'i' badge with tooltip."""
+        badge = QLabel("i")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedSize(12, 12)
+        badge.setToolTip(tooltip_text or "")
+        badge.setStyleSheet(
+            "QLabel {"
+            "background-color: #2b7de9;"
+            "color: white;"
+            "border-radius: 6px;"
+            "font-size: 8px;"
+            "font-weight: bold;"
+            "}"
+        )
+        return badge
 
     def _build_ui(self):
         central = QWidget()
@@ -143,6 +165,7 @@ class PipelineGUI(QMainWindow):
         left_widget = QWidget()
         left_layout = QGridLayout(left_widget)
         left_layout.setColumnStretch(1, 1)
+        left_layout.setColumnMinimumWidth(3, 16)
 
         r = 0
         left_layout.addWidget(QLabel("Intan files folder path"), r, 0)
@@ -153,6 +176,7 @@ class PipelineGUI(QMainWindow):
         self._folder_btn = QPushButton("Browse")
         self._folder_btn.clicked.connect(self._on_folder_browse)
         left_layout.addWidget(self._folder_btn, r, 2)
+        left_layout.addWidget(self._make_info_badge("Folder containing Intan files to process."), r, 3)
         r += 1
 
         left_layout.addWidget(QLabel("Channels in file"), r, 0)
@@ -163,41 +187,50 @@ class PipelineGUI(QMainWindow):
         self.channels_display.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.channels_display.verticalHeader().setVisible(False)
         left_layout.addWidget(self.channels_display, r, 1, 1, 2)
+        left_layout.addWidget(self._make_info_badge("Detected channel IDs from selected folder."), r, 3)
         r += 1
 
-        left_layout.addWidget(QLabel("Probe file path (.json)"), r, 0)
-        self.probe_edit = QLineEdit()
-        self.probe_edit.setText("C:/Spikesorting_utilities/MEA_RdLGN64.json")
-        left_layout.addWidget(self.probe_edit, r, 1)
-        self._probe_btn = QPushButton("Browse")
-        self._probe_btn.clicked.connect(lambda: self._browse_path("file", self.probe_edit, "*.json"))
-        left_layout.addWidget(self._probe_btn, r, 2)
-        r += 1
-
-        left_layout.addWidget(QLabel("Sorter name"), r, 0)
-        self.sorter_edit = QLineEdit()
-        self.sorter_edit.setText("tridesclous2")
-        left_layout.addWidget(self.sorter_edit, r, 1)
+        left_layout.addWidget(QLabel("Probe"), r, 0)
+        self.probe_name_display = QLineEdit()
+        self.probe_name_display.setReadOnly(True)
+        self.probe_name_display.setPlaceholderText("—")
+        self.probe_name_display.setToolTip("")
+        left_layout.addWidget(self.probe_name_display, r, 1)
+        self._probe_edit_btn = QPushButton("Load / Edit probe")
+        self._probe_edit_btn.clicked.connect(self._open_mea_editor)
+        self._probe_edit_btn.setEnabled(MEA_EDITOR_AVAILABLE)
+        left_layout.addWidget(self._probe_edit_btn, r, 2)
+        left_layout.addWidget(
+            self._make_info_badge(
+                "Probe loaded via MEA Editor. The pipeline uses the version displayed in the editor."
+            ),
+            r,
+            3,
+        )
         r += 1
 
         content.addWidget(left_widget)
 
-        # Right column: Trigger section
+        # Right column: Trigger section (independent from left table)
         trigger_group = QGroupBox("Trigger")
+        trigger_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         trigger_layout = QGridLayout(trigger_group)
         trigger_layout.setColumnStretch(1, 1)
+        trigger_layout.setColumnMinimumWidth(2, 16)
 
         t = 0
         self.use_trigger_cb = QCheckBox("Use trigger detection")
         self.use_trigger_cb.setChecked(True)
         self.use_trigger_cb.toggled.connect(self._toggle_trigger_fields_state)
         trigger_layout.addWidget(self.use_trigger_cb, t, 0, 1, 2)
+        trigger_layout.addWidget(self._make_info_badge("Enable trigger extraction from ADC channel."), t, 2)
         t += 1
 
-        trigger_layout.addWidget(QLabel("Trigger type:"), t, 0)
-        trigger_type_widget = QWidget()
-        trigger_type_layout = QHBoxLayout(trigger_type_widget)
-        trigger_type_layout.setContentsMargins(0, 0, 0, 0)
+        trigger_type_row = QWidget()
+        trigger_type_row_layout = QHBoxLayout(trigger_type_row)
+        trigger_type_row_layout.setContentsMargins(0, 0, 0, 0)
+        trigger_type_row_layout.setSpacing(8)
+        trigger_type_row_layout.addWidget(QLabel("Trigger type:"))
         self.trigger_type_group = QButtonGroup()
         self.rb_led = QRadioButton("LED")
         self.rb_electric = QRadioButton("Electric")
@@ -206,9 +239,10 @@ class PipelineGUI(QMainWindow):
         self.trigger_type_group.addButton(self.rb_electric)
         self.rb_led.toggled.connect(self._on_trigger_type_change)
         self.rb_electric.toggled.connect(self._on_trigger_type_change)
-        trigger_type_layout.addWidget(self.rb_led)
-        trigger_type_layout.addWidget(self.rb_electric)
-        trigger_layout.addWidget(trigger_type_widget, t, 1)
+        trigger_type_row_layout.addWidget(self.rb_led)
+        trigger_type_row_layout.addWidget(self.rb_electric)
+        trigger_layout.addWidget(trigger_type_row, t, 0, 1, 2)
+        trigger_layout.addWidget(self._make_info_badge("Select preset for trigger defaults."), t, 2)
         self._trigger_widgets.extend([self.rb_led, self.rb_electric])
         t += 1
 
@@ -217,6 +251,7 @@ class PipelineGUI(QMainWindow):
         self.trigger_threshold_edit.setText("37000")
         self.trigger_threshold_edit.setMaximumWidth(150)
         trigger_layout.addWidget(self.trigger_threshold_edit, t, 1)
+        trigger_layout.addWidget(self._make_info_badge("Threshold used to detect trigger events."), t, 2)
         self._trigger_widgets.append(self.trigger_threshold_edit)
         t += 1
 
@@ -226,6 +261,7 @@ class PipelineGUI(QMainWindow):
         self.polarity_combo.setCurrentText("Falling Edge")
         self.polarity_combo.setMaximumWidth(150)
         trigger_layout.addWidget(self.polarity_combo, t, 1)
+        trigger_layout.addWidget(self._make_info_badge("Edge direction for trigger detection."), t, 2)
         self._trigger_widgets.append(self.polarity_combo)
         t += 1
 
@@ -234,6 +270,7 @@ class PipelineGUI(QMainWindow):
         self.trigger_interval_edit.setText("5.1")
         self.trigger_interval_edit.setMaximumWidth(150)
         trigger_layout.addWidget(self.trigger_interval_edit, t, 1)
+        trigger_layout.addWidget(self._make_info_badge("Minimum interval between triggers (seconds)."), t, 2)
         self._trigger_widgets.append(self.trigger_interval_edit)
         t += 1
 
@@ -242,138 +279,208 @@ class PipelineGUI(QMainWindow):
         self.trigger_channel_edit.setText("0")
         self.trigger_channel_edit.setMaximumWidth(150)
         trigger_layout.addWidget(self.trigger_channel_edit, t, 1)
+        trigger_layout.addWidget(self._make_info_badge("ADC trigger channel index (0-based)."), t, 2)
         self._trigger_widgets.append(self.trigger_channel_edit)
 
-        content.addWidget(trigger_group)
-        main_layout.addLayout(content)
+        # Right column: Trigger first, then Sorter below
+        right_column = QWidget()
+        right_layout = QVBoxLayout(right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(trigger_group)
 
-        # Protocol section: un champ par paramètre, chaque modification met à jour le dict
-        protocol_scroll = QScrollArea()
-        protocol_scroll.setWidgetResizable(True)
-        protocol_scroll.setMaximumHeight(320)
+        sorter_group = QGroupBox("Sorter")
+        sorter_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        sorter_group_layout = QGridLayout(sorter_group)
+        sorter_group_layout.setColumnStretch(1, 1)
+        sorter_group_layout.setColumnMinimumWidth(2, 16)
+        sorter_group_layout.addWidget(QLabel("Sorter"), 0, 0)
+        self.sorter_combo = QComboBox()
+        self.sorter_combo.setMinimumWidth(180)
+        self._populate_sorter_combo()
+        self.sorter_combo.currentTextChanged.connect(self._on_sorter_changed)
+        sorter_group_layout.addWidget(self.sorter_combo, 0, 1)
+        sorter_group_layout.addWidget(self._make_info_badge("Choose spike sorting backend."), 0, 2)
+        right_layout.addWidget(sorter_group)
+
+        # Protocol section: Preprocessing and Postprocessing separated
+        protocol_container = QWidget()
+        protocol_container_layout = QVBoxLayout(protocol_container)
+        protocol_container_layout.setContentsMargins(0, 0, 0, 0)
         protocol_content = QWidget()
         protocol_main = QVBoxLayout(protocol_content)
-
-        protocol_group = QGroupBox("Protocol")
-        protocol_layout = QGridLayout(protocol_group)
-        protocol_layout.setColumnStretch(1, 1)
 
         default = default_protocol_params(400, 5000)
         self._protocol_params = copy.deepcopy(default)
 
-        p = 0
-        protocol_layout.addWidget(QLabel("Bandpass freq min (Hz)"), p, 0)
+        # --- Preprocessing group ---
+        preprocessing_group = QGroupBox("Protocol preprocessing")
+        preprocessing_group.setToolTip("")
+        preprocessing_layout = QGridLayout(preprocessing_group)
+        preprocessing_layout.setColumnStretch(1, 1)
+        preprocessing_layout.setColumnMinimumWidth(2, 16)
+
+        prep = 0
+        preprocessing_layout.addWidget(QLabel("Bandpass freq min (Hz)"), prep, 0)
         self.protocol_freq_min = QDoubleSpinBox()
         self.protocol_freq_min.setRange(1, 20000)
         self.protocol_freq_min.setValue(400)
         self.protocol_freq_min.setDecimals(0)
         self.protocol_freq_min.setMaximumWidth(120)
         self.protocol_freq_min.valueChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_freq_min, p, 1)
-        p += 1
+        preprocessing_layout.addWidget(self.protocol_freq_min, prep, 1)
+        preprocessing_layout.addWidget(self._make_info_badge("Bandpass highpass cutoff frequency (Hz)."), prep, 2)
+        prep += 1
 
-        protocol_layout.addWidget(QLabel("Bandpass freq max (Hz)"), p, 0)
+        preprocessing_layout.addWidget(QLabel("Bandpass freq max (Hz)"), prep, 0)
         self.protocol_freq_max = QDoubleSpinBox()
         self.protocol_freq_max.setRange(1, 20000)
         self.protocol_freq_max.setValue(5000)
         self.protocol_freq_max.setDecimals(0)
         self.protocol_freq_max.setMaximumWidth(120)
         self.protocol_freq_max.valueChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_freq_max, p, 1)
-        p += 1
+        preprocessing_layout.addWidget(self.protocol_freq_max, prep, 1)
+        preprocessing_layout.addWidget(self._make_info_badge("Bandpass lowpass cutoff frequency (Hz)."), prep, 2)
 
-        protocol_layout.addWidget(QLabel("Unit locations method"), p, 0)
+        protocol_main.addWidget(preprocessing_group)
+
+        # --- Postprocessing group ---
+        postprocessing_group = QGroupBox("Protocol postprocessing")
+        postprocessing_group.setToolTip("")
+        postprocessing_layout = QGridLayout(postprocessing_group)
+        postprocessing_layout.setColumnStretch(1, 1)
+        postprocessing_layout.setColumnMinimumWidth(2, 16)
+
+        post = 0
+        postprocessing_layout.addWidget(QLabel("Unit locations method"), post, 0)
         self.protocol_unit_locations_method = QComboBox()
         self.protocol_unit_locations_method.addItems(["center_of_mass", "monopolar_triangulation"])
         self.protocol_unit_locations_method.setMaximumWidth(180)
         self.protocol_unit_locations_method.currentTextChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_unit_locations_method, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_unit_locations_method, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Method to estimate unit locations."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Random spikes max_spikes_per_unit"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Random spikes max_spikes_per_unit"), post, 0)
         self.protocol_random_spikes_max = QSpinBox()
         self.protocol_random_spikes_max.setRange(1, 10000)
         self.protocol_random_spikes_max.setValue(1000)
         self.protocol_random_spikes_max.setMaximumWidth(120)
         self.protocol_random_spikes_max.valueChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_random_spikes_max, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_random_spikes_max, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Max random spikes per unit to sample."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Waveforms ms_before"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Waveforms ms_before"), post, 0)
         self.protocol_waveforms_ms_before = QDoubleSpinBox()
         self.protocol_waveforms_ms_before.setRange(0.1, 10)
         self.protocol_waveforms_ms_before.setValue(1.0)
         self.protocol_waveforms_ms_before.setSingleStep(0.1)
         self.protocol_waveforms_ms_before.setMaximumWidth(120)
         self.protocol_waveforms_ms_before.valueChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_waveforms_ms_before, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_waveforms_ms_before, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Waveform window before peak (ms)."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Waveforms ms_after"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Waveforms ms_after"), post, 0)
         self.protocol_waveforms_ms_after = QDoubleSpinBox()
         self.protocol_waveforms_ms_after.setRange(0.1, 10)
         self.protocol_waveforms_ms_after.setValue(2.0)
         self.protocol_waveforms_ms_after.setSingleStep(0.1)
         self.protocol_waveforms_ms_after.setMaximumWidth(120)
         self.protocol_waveforms_ms_after.valueChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_waveforms_ms_after, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_waveforms_ms_after, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Waveform window after peak (ms)."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Correlograms window_ms"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Correlograms window_ms"), post, 0)
         self.protocol_correlograms_window = QDoubleSpinBox()
         self.protocol_correlograms_window.setRange(1, 500)
         self.protocol_correlograms_window.setValue(50.0)
         self.protocol_correlograms_window.setMaximumWidth(120)
         self.protocol_correlograms_window.valueChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_correlograms_window, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_correlograms_window, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Correlogram total window (ms)."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Correlograms bin_ms"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Correlograms bin_ms"), post, 0)
         self.protocol_correlograms_bin = QDoubleSpinBox()
         self.protocol_correlograms_bin.setRange(0.1, 10)
         self.protocol_correlograms_bin.setValue(1.0)
         self.protocol_correlograms_bin.setSingleStep(0.1)
         self.protocol_correlograms_bin.setMaximumWidth(120)
         self.protocol_correlograms_bin.valueChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_correlograms_bin, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_correlograms_bin, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Correlogram bin size (ms)."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Spike amplitudes peak_sign"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Spike amplitudes peak_sign"), post, 0)
         self.protocol_spike_amplitudes_peak = QComboBox()
         self.protocol_spike_amplitudes_peak.addItems(["neg", "pos"])
         self.protocol_spike_amplitudes_peak.setMaximumWidth(120)
         self.protocol_spike_amplitudes_peak.currentTextChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_spike_amplitudes_peak, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_spike_amplitudes_peak, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Peak sign used for spike amplitudes."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Template similarity method"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Template similarity method"), post, 0)
         self.protocol_template_similarity_method = QComboBox()
         self.protocol_template_similarity_method.addItems(["cosine_similarity"])
         self.protocol_template_similarity_method.setMaximumWidth(180)
         self.protocol_template_similarity_method.currentTextChanged.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_template_similarity_method, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_template_similarity_method, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Template similarity method."), post, 2)
+        post += 1
 
-        protocol_layout.addWidget(QLabel("Template metrics multi_channel"), p, 0)
+        postprocessing_layout.addWidget(QLabel("Template metrics multi_channel"), post, 0)
         self.protocol_template_metrics_multi = QCheckBox("")
         self.protocol_template_metrics_multi.setChecked(False)
         self.protocol_template_metrics_multi.toggled.connect(self._update_protocol_from_form)
-        protocol_layout.addWidget(self.protocol_template_metrics_multi, p, 1)
-        p += 1
+        postprocessing_layout.addWidget(self.protocol_template_metrics_multi, post, 1)
+        postprocessing_layout.addWidget(self._make_info_badge("Include multi-channel template metrics."), post, 2)
 
+        protocol_main.addWidget(postprocessing_group)
+
+        # Protocol buttons (Load / Save / Reset apply to full protocol)
         protocol_btns = QHBoxLayout()
         self._protocol_load_btn = QPushButton("Load protocol")
         self._protocol_load_btn.clicked.connect(self._load_protocol_from_file)
+        self._protocol_save_btn = QPushButton("Save protocol")
+        self._protocol_save_btn.clicked.connect(self._save_protocol_to_file)
         self._protocol_reset_btn = QPushButton("Reset to defaults")
         self._protocol_reset_btn.clicked.connect(self._reset_protocol_defaults)
         protocol_btns.addWidget(self._protocol_load_btn)
+        protocol_btns.addWidget(self._protocol_save_btn)
         protocol_btns.addWidget(self._protocol_reset_btn)
         protocol_btns.addStretch()
-        protocol_layout.addLayout(protocol_btns, p, 0, 1, 2)
-        protocol_main.addWidget(protocol_group)
-        protocol_scroll.setWidget(protocol_content)
-        main_layout.addWidget(protocol_scroll)
+        protocol_main.addLayout(protocol_btns)
+
+        # Sorter parameters (dynamic, adapts to selected sorter)
+        self.sorter_params_group = QGroupBox("Sorter parameters")
+        self.sorter_params_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        sorter_params_outer = QVBoxLayout(self.sorter_params_group)
+        self.sorter_params_scroll = QScrollArea()
+        self.sorter_params_scroll.setWidgetResizable(True)
+        self.sorter_params_scroll.setMaximumHeight(220)
+        self.sorter_params_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.sorter_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.sorter_params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.sorter_params_container = QWidget()
+        self.sorter_params_layout = QGridLayout(self.sorter_params_container)
+        self.sorter_params_layout.setColumnStretch(1, 1)
+        self.sorter_params_layout.setColumnMinimumWidth(1, 16)
+        self.sorter_params_scroll.setWidget(self.sorter_params_container)
+        sorter_params_outer.addWidget(self.sorter_params_scroll)
+        self._sorter_param_widgets = {}
+        self.sorter_params_reset_btn = QPushButton("Reset sorter params to defaults")
+        self.sorter_params_reset_btn.clicked.connect(self._reset_sorter_params_to_defaults)
+        sorter_params_outer.addWidget(self.sorter_params_reset_btn)
+        right_layout.addWidget(self.sorter_params_group)
+        protocol_container_layout.addWidget(protocol_content)
+        content.addWidget(protocol_container)
+        content.addWidget(right_column)
+        main_layout.addLayout(content)
         self._update_protocol_from_form()  # Sync initial form values to dict
+        self._rebuild_sorter_params_ui()  # Build sorter params for initial sorter
 
         # Run / Stop controls
         controls = QHBoxLayout()
@@ -406,9 +513,10 @@ class PipelineGUI(QMainWindow):
         self._form_widgets = [
             self._file_btn, self.folder_edit, self._folder_btn,
             self.channels_display,
-            self.probe_edit, self._probe_btn, self.sorter_edit,
+            self.probe_name_display, self._probe_edit_btn, self.sorter_combo,
             *self._get_protocol_form_widgets(),
-            self._protocol_load_btn, self._protocol_reset_btn,
+            self._protocol_load_btn, self._protocol_save_btn, self._protocol_reset_btn,
+            self.sorter_params_group, self.sorter_params_reset_btn,
             self.use_trigger_cb, self.rb_led, self.rb_electric,
             self.trigger_threshold_edit, self.polarity_combo,
             self.trigger_interval_edit, self.trigger_channel_edit,
@@ -424,6 +532,160 @@ class PipelineGUI(QMainWindow):
         enabled = self.use_trigger_cb.isChecked()
         for w in self._trigger_widgets:
             w.setEnabled(enabled)
+
+    def _populate_sorter_combo(self):
+        """Fill sorter combo with available sorters from SpikeInterface."""
+        self.sorter_combo.blockSignals(True)
+        self.sorter_combo.clear()
+        if SORTERS_AVAILABLE:
+            sorters = sorted(available_sorters())
+            self.sorter_combo.addItems(sorters)
+        else:
+            self.sorter_combo.addItem("tridesclous2")
+        idx = self.sorter_combo.findText("tridesclous2")
+        if idx >= 0:
+            self.sorter_combo.setCurrentIndex(idx)
+        self.sorter_combo.blockSignals(False)
+
+    def _on_sorter_changed(self):
+        """When sorter selection changes, save current params and rebuild UI for new sorter."""
+        # Save OLD sorter's params before rebuild (combo already shows NEW sorter, widgets still show OLD)
+        if self._current_sorter_name:
+            self._update_sorter_params_from_form(target_sorter=self._current_sorter_name)
+        self._rebuild_sorter_params_ui()
+        self._save_last_session()
+
+    def _rebuild_sorter_params_ui(self):
+        """Rebuild the sorter parameters section for the currently selected sorter."""
+        sorter_name = self.sorter_combo.currentText().strip()
+        if not sorter_name:
+            return
+        # Clear existing widgets (labels + value widgets) from the layout
+        while self.sorter_params_layout.count():
+            item = self.sorter_params_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._sorter_param_widgets.clear()
+        if not SORTERS_AVAILABLE:
+            self._current_sorter_name = sorter_name
+            return
+        try:
+            params = get_default_sorter_params(sorter_name)
+            descriptions = get_sorter_params_description(sorter_name)
+        except Exception:
+            params = {}
+            descriptions = {}
+        # Restore saved values for this sorter (block signals to avoid N saves during init)
+        saved = self._protocol_params.get("sorter_params", {}).get(sorter_name, {})
+        row = 0
+        for key in sorted(params.keys()):
+            val = saved.get(key, params[key])
+            desc = descriptions.get(key, "")
+            if isinstance(val, dict):
+                continue
+            if isinstance(val, list) and val and not isinstance(val[0], (int, float, str, bool)):
+                continue
+            label = QLabel(key)
+            label.setToolTip("")
+            if isinstance(val, bool):
+                w = QCheckBox()
+                w.blockSignals(True)
+                w.setChecked(val)
+                w.blockSignals(False)
+                w.toggled.connect(self._update_sorter_params_from_form)
+            elif isinstance(val, int):
+                w = QSpinBox()
+                w.setRange(-999999, 999999)
+                w.blockSignals(True)
+                w.setValue(val)
+                w.blockSignals(False)
+                w.valueChanged.connect(self._update_sorter_params_from_form)
+            elif isinstance(val, float):
+                w = QDoubleSpinBox()
+                w.setRange(-1e9, 1e9)
+                w.setDecimals(4)
+                w.blockSignals(True)
+                w.setValue(val)
+                w.blockSignals(False)
+                w.valueChanged.connect(self._update_sorter_params_from_form)
+            elif isinstance(val, str):
+                w = QLineEdit()
+                w.blockSignals(True)
+                w.setText(val)
+                w.blockSignals(False)
+                w.textChanged.connect(self._update_sorter_params_from_form)
+            elif isinstance(val, list):
+                w = QLineEdit()
+                w.blockSignals(True)
+                w.setText(json.dumps(val))
+                w.blockSignals(False)
+                w.textChanged.connect(self._update_sorter_params_from_form)
+            else:
+                w = QLineEdit()
+                w.blockSignals(True)
+                w.setText(str(val))
+                w.blockSignals(False)
+                w.textChanged.connect(self._update_sorter_params_from_form)
+            w.setMaximumWidth(180)
+            w.setToolTip("")
+            self.sorter_params_layout.addWidget(label, row, 0)
+            self.sorter_params_layout.addWidget(self._make_info_badge(desc), row, 1)
+            self.sorter_params_layout.addWidget(w, row, 2)
+            self._sorter_param_widgets[key] = w
+            row += 1
+        self._current_sorter_name = sorter_name
+
+    def _update_sorter_params_from_form(self, target_sorter=None):
+        """Read sorter param widgets and store in protocol_params."""
+        sorter_name = (target_sorter or self.sorter_combo.currentText()).strip()
+        if not sorter_name:
+            return
+        if not SORTERS_AVAILABLE:
+            return
+        try:
+            defaults = get_default_sorter_params(sorter_name)
+        except Exception:
+            defaults = {}
+        self._protocol_params.setdefault("sorter_params", {})
+        self._protocol_params["sorter_params"].setdefault(sorter_name, {})
+        for key, w in self._sorter_param_widgets.items():
+            default_val = defaults.get(key)
+            if isinstance(w, QCheckBox):
+                val = w.isChecked()
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                val = w.value()
+            elif isinstance(w, QLineEdit):
+                txt = w.text()
+                if isinstance(default_val, list):
+                    try:
+                        val = json.loads(txt)
+                    except (json.JSONDecodeError, TypeError):
+                        val = default_val if default_val is not None else []
+                elif isinstance(default_val, (int, float)):
+                    try:
+                        val = int(txt) if isinstance(default_val, int) else float(txt)
+                    except (ValueError, TypeError):
+                        val = default_val
+                else:
+                    val = txt
+            else:
+                val = default_val
+            self._protocol_params["sorter_params"][sorter_name][key] = val
+        self._save_last_session()
+
+    def _reset_sorter_params_to_defaults(self):
+        """Reset sorter params to SpikeInterface defaults for current sorter."""
+        sorter_name = self.sorter_combo.currentText().strip()
+        if not sorter_name or not SORTERS_AVAILABLE:
+            return
+        try:
+            defaults = get_default_sorter_params(sorter_name)
+        except Exception:
+            return
+        self._protocol_params.setdefault("sorter_params", {})
+        self._protocol_params["sorter_params"][sorter_name] = copy.deepcopy(defaults)
+        self._rebuild_sorter_params_ui()
+        self._save_last_session()
 
     def _on_trigger_type_change(self):
         preset = {"led": ("37000", "Falling Edge", "5.1"), "electric": ("39000", "Rising Edge", "5.1")}
@@ -448,6 +710,7 @@ class PipelineGUI(QMainWindow):
 
     def _collect_form_state(self):
         """Collect all form values for save/load settings."""
+        self._update_sorter_params_from_form()
         state = {
             "folder_path": self.folder_edit.text(),
             "use_trigger": self.use_trigger_cb.isChecked(),
@@ -456,8 +719,8 @@ class PipelineGUI(QMainWindow):
             "trigger_polarity": self.polarity_combo.currentText(),
             "trigger_min_interval": self.trigger_interval_edit.text(),
             "trigger_channel_index": self.trigger_channel_edit.text(),
-            "sorter_name": self.sorter_edit.text(),
-            "my_probe_path": self.probe_edit.text(),
+            "sorter_name": self.sorter_combo.currentText(),
+            "my_probe_path": self._probe_path,
         }
         state["protocol_params"] = copy.deepcopy(self._protocol_params)
         return state
@@ -478,13 +741,24 @@ class PipelineGUI(QMainWindow):
             self.polarity_combo.setCurrentText(polarity)
         self.trigger_interval_edit.setText(state.get("trigger_min_interval", self.trigger_interval_edit.text()))
         self.trigger_channel_edit.setText(state.get("trigger_channel_index", self.trigger_channel_edit.text()))
-        self.sorter_edit.setText(state.get("sorter_name", self.sorter_edit.text()))
-        self.probe_edit.setText(state.get("my_probe_path", self.probe_edit.text()))
+        sorter_name = state.get("sorter_name", "tridesclous2")
+        self.sorter_combo.blockSignals(True)
+        try:
+            idx = self.sorter_combo.findText(sorter_name)
+            if idx >= 0:
+                self.sorter_combo.setCurrentIndex(idx)
+            else:
+                self.sorter_combo.setCurrentText(sorter_name)
+        finally:
+            self.sorter_combo.blockSignals(False)
+        self._set_probe_path(state.get("my_probe_path", self._probe_path))
+        self._on_probe_path_changed()
         protocol_params = state.get("protocol_params")
         if isinstance(protocol_params, dict):
             self._protocol_params = copy.deepcopy(protocol_params)
             self._apply_protocol_to_form(protocol_params)
-        elif state.get("protocol_freq_min") is not None or state.get("protocol_freq_max") is not None:
+            self._rebuild_sorter_params_ui()
+        if state.get("protocol_freq_min") is not None or state.get("protocol_freq_max") is not None:
             self.protocol_freq_min.setValue(float(state.get("protocol_freq_min", 400)))
             self.protocol_freq_max.setValue(float(state.get("protocol_freq_max", 5000)))
             self._update_protocol_from_form()
@@ -499,8 +773,29 @@ class PipelineGUI(QMainWindow):
         except Exception:
             pass
 
-    def _save_last_session(self):
-        """Save settings to the default session file (auto-save on close, etc.)."""
+    def _save_last_session(self, immediate=False):
+        """Save settings to the default session file. Debounced unless immediate=True."""
+        if immediate:
+            if self._save_debounce_timer:
+                self._save_debounce_timer.stop()
+                self._save_debounce_timer = None
+            self._do_save_last_session()
+            return
+        if self._save_debounce_timer is None:
+            self._save_debounce_timer = QTimer(self)
+            self._save_debounce_timer.setSingleShot(True)
+            self._save_debounce_timer.timeout.connect(self._flush_save_last_session)
+        self._save_debounce_timer.start(400)
+
+    def _flush_save_last_session(self):
+        """Called when debounce timer fires; also used for immediate save."""
+        if self._save_debounce_timer:
+            self._save_debounce_timer.stop()
+            self._save_debounce_timer = None
+        self._do_save_last_session()
+
+    def _do_save_last_session(self):
+        """Perform the actual save to disk."""
         try:
             with open(self._session_file, "w", encoding="utf-8") as f:
                 json.dump(self._collect_form_state(), f, indent=2, ensure_ascii=True)
@@ -515,13 +810,16 @@ class PipelineGUI(QMainWindow):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._collect_form_state(), f, indent=2, ensure_ascii=True)
-            self._save_last_session()  # Also update auto-restore file
+            self._save_last_session(immediate=True)  # Also update auto-restore file
             QMessageBox.information(self, "Settings saved", f"Settings saved to:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
 
     def closeEvent(self, event):
-        self._save_last_session()
+        self._stop_mea_editor_sync_timer()
+        if MEA_EDITOR_AVAILABLE and self._mea_editor_window is not None:
+            self._mea_editor_window.close()
+        self._save_last_session(immediate=True)
         event.accept()
 
     def _on_folder_browse(self):
@@ -544,7 +842,7 @@ class PipelineGUI(QMainWindow):
         if not folder_path or not os.path.isdir(folder_path):
             return
         self._populate_channels_table(None)  # show "Loading..."
-        worker = _ChannelsLoaderWorker(folder_path)
+        worker = ChannelsLoaderWorker(folder_path)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -592,6 +890,111 @@ class PipelineGUI(QMainWindow):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.channels_display.setItem(row, col, item)
 
+    def _set_probe_path(self, path):
+        """Store probe path and display only the filename."""
+        self._probe_path = path.strip() if path else ""
+        name = os.path.basename(self._probe_path) if self._probe_path else ""
+        self.probe_name_display.setText(name)
+        self._save_last_session()
+
+    def _on_probe_path_changed(self):
+        """Reload MEA editor if open and path changed."""
+        if self._mea_editor_window and MEA_EDITOR_AVAILABLE:
+            path = self._probe_path
+            if path and os.path.isfile(path) and path != getattr(self._mea_editor_window, "_initial_path", None):
+                try:
+                    self._mea_editor_window._initial_path = path
+                    self._mea_editor_window._load_array_from_file(path)
+                    self._mea_editor_window.current_file_path = ""
+                    self._mea_editor_window.is_dirty = False
+                    self._mea_editor_window._update_title()
+                except Exception:
+                    pass
+
+    def _open_mea_editor(self):
+        """Open MEA editor window. Load probe via File > Open in the editor."""
+        if not MEA_EDITOR_AVAILABLE:
+            QMessageBox.information(
+                self,
+                "MEA Editor",
+                "Install mea-editor to edit probes: pip install mea-editor",
+            )
+            return
+        path = self._probe_path if (self._probe_path and os.path.isfile(self._probe_path)) else ""
+        if self._mea_editor_window is None:
+            self._mea_editor_window = EmbeddedMEAEditor(
+                path,
+                on_file_loaded=self._on_probe_file_loaded,
+                on_close_callback=self._on_mea_editor_closed,
+            )
+        # Si la fenêtre existe déjà, on l'affiche sans recharger : garder la version modifiée
+        self._mea_editor_window.show()
+        self._mea_editor_window.raise_()
+        self._mea_editor_window.activateWindow()
+        self._start_mea_editor_sync_timer()
+
+    def _on_probe_file_loaded(self, path):
+        """Called when a probe file is loaded in MEA Editor (immediate update)."""
+        if path and os.path.isfile(path):
+            self._set_probe_path(path)
+
+    def _on_mea_editor_closed(self, path):
+        """Called when MEA Editor is closed, with the path of the loaded probe (if any)."""
+        self._stop_mea_editor_sync_timer()
+        if path and os.path.isfile(path):
+            self._set_probe_path(path)
+
+    def _start_mea_editor_sync_timer(self):
+        """Start timer to sync probe display with MEA Editor state (modifications)."""
+        self._stop_mea_editor_sync_timer()
+        self._mea_editor_sync_timer = QTimer(self)
+        self._mea_editor_sync_timer.timeout.connect(self._sync_probe_display_from_mea_editor)
+        self._mea_editor_sync_timer.start(1500)
+
+    def _stop_mea_editor_sync_timer(self):
+        """Stop the MEA Editor sync timer."""
+        if self._mea_editor_sync_timer:
+            self._mea_editor_sync_timer.stop()
+            self._mea_editor_sync_timer = None
+
+    def _sync_probe_display_from_mea_editor(self):
+        """Update probe display to reflect MEA Editor state (modified indicator)."""
+        if not MEA_EDITOR_AVAILABLE or self._mea_editor_window is None:
+            self._stop_mea_editor_sync_timer()
+            return
+        if not self._mea_editor_window.isVisible():
+            self._stop_mea_editor_sync_timer()
+            return
+        path = getattr(self._mea_editor_window, "current_file_path", None) or self._mea_editor_window._initial_path
+        base = os.path.basename(path) if path else ""
+        if not base and list(self._mea_editor_window.electrodes.values()):
+            base = "(unsaved probe)"
+        dirty = getattr(self._mea_editor_window, "is_dirty", False)
+        self.probe_name_display.setText(f"{base} *" if dirty and base else base)
+
+    def _get_probe_path_for_pipeline(self, folder_path=None):
+        """
+        Return the probe file path to use for the pipeline.
+        If MEA editor was opened and has content, ALWAYS export current state (all modifications)
+        to a file in the recording folder so the subprocess can read it reliably.
+        """
+        if MEA_EDITOR_AVAILABLE and self._mea_editor_window is not None:
+            electrodes = list(self._mea_editor_window.electrodes.values())
+            if electrodes and folder_path and os.path.isdir(folder_path):
+                try:
+                    path = os.path.join(folder_path, "probe_pipeline_temp.json")
+                    save_electrodes_to_file(path, electrodes, self._mea_editor_window.si_units)
+                    self._probe_temp_path = path
+                    self._last_probe_from_mea_editor = True
+                    return path
+                except Exception as exc:
+                    raise ValueError(
+                        f"Could not export probe from MEA Editor: {exc}\n"
+                        "Fix errors in the MEA Editor (e.g. duplicate contact_ids) before running the pipeline."
+                    ) from exc
+        self._last_probe_from_mea_editor = False
+        return self._probe_path
+
     def _browse_path(self, mode, target_edit, filter_ext=None):
         if mode == "folder":
             selected = QFileDialog.getExistingDirectory(self, "Select folder")
@@ -601,10 +1004,6 @@ class PipelineGUI(QMainWindow):
         if selected:
             target_edit.setText(selected)
             self._save_last_session()
-
-    def _get_current_protocol_params(self):
-        """Return the protocol dict (updated by _update_protocol_from_form on each field change)."""
-        return self._protocol_params
 
     def _update_protocol_from_form(self):
         """Met à jour le dictionnaire protocol à chaque modification d'un champ."""
@@ -679,17 +1078,33 @@ class PipelineGUI(QMainWindow):
                 raise ValueError("Protocol must contain 'preprocessing' and 'postprocessing' keys.")
             self._protocol_params = copy.deepcopy(parsed)
             self._apply_protocol_to_form(parsed)
-            self._save_last_session()
+            self._rebuild_sorter_params_ui()
+            self._save_last_session(immediate=True)
             QMessageBox.information(self, "Protocol loaded", f"Protocol loaded from:\n{path}")
         except json.JSONDecodeError as e:
             QMessageBox.critical(self, "Invalid JSON", str(e))
         except (ValueError, TypeError) as e:
             QMessageBox.critical(self, "Invalid protocol", str(e))
 
+    def _save_protocol_to_file(self):
+        """Save the current protocol (preprocessing, postprocessing, sorter params) to a JSON file."""
+        self._update_sorter_params_from_form()
+        path, _ = QFileDialog.getSaveFileName(self, "Save protocol", "", JSON_FILTER)
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._protocol_params, f, indent=2, ensure_ascii=True)
+            self._save_last_session(immediate=True)
+            QMessageBox.information(self, "Protocol saved", f"Protocol saved to:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+
     def _reset_protocol_defaults(self):
         default = default_protocol_params(400, 5000)
         self._protocol_params = copy.deepcopy(default)
         self._apply_protocol_to_form(default)
+        self._reset_sorter_params_to_defaults()
         self._save_last_session()
 
     def _clear_logs(self):
@@ -768,26 +1183,23 @@ class PipelineGUI(QMainWindow):
                 state = json.load(f)
             state.pop("_description", None)
             self._apply_form_state(state)
-            self._save_last_session()
+            self._save_last_session(immediate=True)
             self._toggle_trigger_fields_state()
             QMessageBox.information(self, "Config loaded", f"Parameters loaded from:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "Load failed", str(exc))
-
-    def _save_protocol_to_output_folder(self, folder_path):
-        protocol_path = os.path.join(folder_path, "protocol.json")
-        try:
-            with open(protocol_path, "w", encoding="utf-8") as f:
-                json.dump(self._get_current_protocol_params(), f, indent=2, ensure_ascii=False)
-            self._log(f"Protocol saved to {protocol_path}")
-        except Exception as exc:
-            self._log(f"Warning: could not save protocol.json: {exc}")
 
     def _on_pipeline_done(self, success: bool, payload):
         """Slot appelé sur le thread principal via pipeline_done_signal."""
         if success:
             self._on_pipeline_success(payload)
         else:
+            if self._probe_temp_path:
+                try:
+                    os.unlink(self._probe_temp_path)
+                except Exception:
+                    pass
+                self._probe_temp_path = None
             self._reset_pipeline_state()
             if payload == "file_in_use":
                 err_msg = "Le fichier PDF est déjà ouvert.\n\nVeuillez fermer le fichier (par exemple dans un lecteur PDF) puis cliquer sur Run pour réessayer."
@@ -799,7 +1211,6 @@ class PipelineGUI(QMainWindow):
     def _on_pipeline_success(self, folder_path):
         self._reset_pipeline_state()
         QApplication.processEvents()
-        self._save_protocol_to_output_folder(folder_path)
         self._log("Pipeline completed successfully.")
         self._log("Opening output folder...")
         try:
@@ -817,18 +1228,18 @@ class PipelineGUI(QMainWindow):
                 pass
             return False
         except (PermissionError, OSError) as e:
-            return _is_file_in_use_error(e)
+            return is_file_in_use_error(e)
 
     def _run_pipeline_async(self):
         """Launch the pipeline in a subprocess. Logs are relayed via a queue."""
-        self._save_last_session()
+        self._save_last_session(immediate=True)
         self._set_run_button_state(False)
         params = self._collect_pipeline_params()
         if params is None:
             self._set_run_button_state(True)
             return
         # Vérifier si le PDF est déjà ouvert AVANT de lancer le sorting
-        if self._is_pdf_file_in_use(params["folder_path"], params["sorter_name"]):
+        if self._is_pdf_file_in_use(params["output_folder"], params["sorter_name"]):
             self._set_run_button_state(True)
             QMessageBox.warning(
                 self,
@@ -837,11 +1248,13 @@ class PipelineGUI(QMainWindow):
                 "Veuillez fermer le fichier (par exemple dans un lecteur PDF) avant de lancer le pipeline.",
             )
             return
+        if self._last_probe_from_mea_editor:
+            self._log("Probe used: current version from MEA Editor (including modifications).")
         self._set_form_enabled(False)  # Lock form while pipeline runs
         # Queue for inter-process communication (child -> parent)
         self._log_queue = multiprocessing.Queue()
         self._pipeline_process = multiprocessing.Process(
-            target=_run_pipeline_in_process,
+            target=run_pipeline_in_process,
             args=(params, self._log_queue),
             daemon=True,
         )
@@ -856,11 +1269,11 @@ class PipelineGUI(QMainWindow):
         Returns a dict of params, or None if validation fails.
         """
         try:
+            self._update_sorter_params_from_form()
             folder_path = self.folder_edit.text().strip()
             use_trigger = self.use_trigger_cb.isChecked()
-            sorter_name = self.sorter_edit.text().strip()
-            my_probe_path = self.probe_edit.text().strip()
-            protocol_params = self._get_current_protocol_params()
+            sorter_name = self.sorter_combo.currentText().strip()
+            protocol_params = self._protocol_params
             bandpass = protocol_params.get("preprocessing", {}).get("bandpass_filter", {})
             min_freq = float(bandpass.get("freq_min", 400))
             max_freq = float(bandpass.get("freq_max", 5000))
@@ -877,8 +1290,13 @@ class PipelineGUI(QMainWindow):
             # Validation
             if not folder_path or not os.path.isdir(folder_path):
                 raise ValueError("folder_path is missing or does not exist.")
+            # Dossier de sortie : date_heure_nom_sorter (tous les outputs y vont)
+            output_folder_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_" + sorter_name
+            output_folder = os.path.join(folder_path, output_folder_name)
+            os.makedirs(output_folder, exist_ok=True)
+            my_probe_path = self._get_probe_path_for_pipeline(output_folder)
             if not my_probe_path or not os.path.isfile(my_probe_path):
-                raise ValueError("my_probe_df path is missing or does not exist.")
+                raise ValueError("Probe file is missing or does not exist. Load a probe via MEA Editor first.")
             if min_freq <= 0 or max_freq <= 0:
                 raise ValueError("protocol min_freq and max_freq must be > 0.")
             if min_freq >= max_freq:
@@ -892,6 +1310,7 @@ class PipelineGUI(QMainWindow):
             # Build params dict for the subprocess (must be picklable)
             return {
                 "folder_path": folder_path,
+                "output_folder": output_folder,
                 "use_trigger": use_trigger,
                 "sorter_name": sorter_name,
                 "my_probe_path": my_probe_path,
@@ -938,116 +1357,6 @@ class PipelineGUI(QMainWindow):
             else:
                 self.log_signal.emit(str(item))
         self._pipeline_process = None
-
-def _is_file_in_use_error(exc):
-    """Détecte si une exception indique qu'un fichier est ouvert par un autre processus."""
-    err_msg = str(exc).lower()
-    return (
-        "being used" in err_msg
-        or "another process" in err_msg
-        or "permission denied" in err_msg
-        or "accès refusé" in err_msg
-        or (hasattr(exc, "winerror") and getattr(exc, "winerror", None) == 32)
-    )
-
-
-def _run_pipeline_in_process(params, log_queue):
-    """
-    Entry point for the pipeline subprocess.
-    Receives params dict and a multiprocessing.Queue for log/progress/done messages.
-    Message format: ("log", str), ("progress", bool), ("done", "success"|"error", payload).
-    """
-    def _log(msg):
-        log_queue.put(("log", msg))
-
-    def _progress(visible):
-        log_queue.put(("progress", visible))
-
-    try:
-        folder_path = params["folder_path"]
-        use_trigger = params["use_trigger"]
-        sorter_name = params["sorter_name"]
-        my_probe_path = params["my_probe_path"]
-        protocol_params = params["protocol_params"]
-        min_freq = params["min_freq"]
-        max_freq = params["max_freq"]
-        trigger_type = params["trigger_type"]
-        my_protocol_path = os.path.join(folder_path, "protocol.json")
-
-        # Log startup info
-        _log("Starting pipeline...")
-        _log(f"folder_path: {folder_path}")
-        _log(f"sorter_name: {sorter_name}")
-        _log(f"use_trigger: {use_trigger}")
-        if use_trigger:
-            _log(
-                f"trigger: type={trigger_type}, "
-                f"threshold={params['trigger_threshold']}, "
-                f"polarity={'Rising' if params['trigger_edge'] == 1 else 'Falling'} Edge, "
-                f"min_interval={params['trigger_min_interval']}"
-            )
-            _log(f"trigger_channel_index: {params['trigger_channel_index']}")
-        _log(f"protocol_path (auto): {my_protocol_path}")
-        _log(f"probe_path: {my_probe_path}")
-        _log(f"bandpass: {min_freq} -> {max_freq} Hz")
-
-        # Trigger and timestamps
-        timestamps_parameters = None
-        if use_trigger:
-            trigger = Trigger(
-                params["trigger_threshold"],
-                params["trigger_edge"],
-                params["trigger_min_interval"],
-            )
-            timestamps_parameters = TimestampsParameters(
-                trigger=trigger,
-                trigger_channel_index=params["trigger_channel_index"],
-                trigger_type=trigger_type,
-            )
-        # Load Intan data
-        sorter = Sorter(sorter_name)
-        _log("Loading Intan files...")
-        rhs_files = IntanFile(folder_path)
-        _log(f"Channel IDs: {rhs_files.channel_ids}")
-        _log(f"Sampling frequency: {rhs_files.frequency}")
-        _log(f"Number of channels: {rhs_files.number_of_channels}")
-        _log(f"Number of segments: {rhs_files.number_of_segments}")
-        if use_trigger:
-            _log("Computing trigger timestamps...")
-            rhs_files.generate_trigger_timestamps(timestamps_parameters)
-        else:
-            _log("Trigger disabled: skipping trigger timestamp extraction.")
-
-        protocol_params = copy.deepcopy(params["protocol_params"])
-        protocol_params["_file_path"] = my_protocol_path
-        my_probe_df = Probe(my_probe_path)
-        _log("Associating probe...")
-        rhs_files.associate_probe(my_probe_df)
-
-        _log("Running sorter + analyzer (this can take time)...")
-        _progress(True)
-        pipeline = Pipeline(sorter, folder_path, protocol_params, rhs_files)
-
-        _log("Generating PDF report...")
-        try:
-            PDFGenerator(folder_path, pipeline)
-        except (PermissionError, OSError) as pdf_exc:
-            if _is_file_in_use_error(pdf_exc):
-                _progress(False)
-                _log("ERROR: Le fichier PDF est déjà ouvert.")
-                log_queue.put(("done", "error", "file_in_use"))
-                return
-            raise
-        pdf_path = os.path.join(folder_path, f"Summary_figures_sorting_{sorter_name}.pdf")
-        _log(f"PDF generated: {pdf_path}")
-        _progress(False)
-
-        log_queue.put(("done", "success", folder_path))
-    except Exception as exc:
-        _progress(False)
-        _log(f"ERROR: {exc}")
-        _log(traceback.format_exc())
-        log_queue.put(("done", "error", str(exc)))  # Notify parent of failure
 
 
 def run_app():
