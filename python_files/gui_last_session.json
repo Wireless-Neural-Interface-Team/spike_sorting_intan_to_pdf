@@ -1,5 +1,5 @@
 {
-  "folder_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Test/20251205 - BlueLEDStim_5sON_20s_interStim_RetinaP8_retina3_251205_165648_251205_170112",
+  "folder_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Recordings/Micka\u00ebl/20251205 - BlueLEDStim_5sON_20s_interStim_RetinaP8_retina3_251205_165648_251205_170112",
   "use_trigger": true,
   "trigger_type": "electric",
   "trigger_threshold": "37000",
@@ -7,7 +7,7 @@
   "trigger_min_interval": "5.1",
   "trigger_channel_index": "0",
   "sorter_name": "tridesclous",
-  "my_probe_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Recordings/Micka\u00ebl/MEA_RdLGN64.json",
+  "my_probe_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Recordings/Micka\u00ebl/20251205 - BlueLEDStim_5sON_20s_interStim_RetinaP8_retina3_251205_165648_251205_170112/2026-03-12_16-22-10_tridesclous/probe_used.json",
   "protocol_params": {
     "preprocessing": {
       "unsigned_to_signed": {},
@@ -137,18 +137,18 @@
         "x_centers": "None"
       },
       "tridesclous": {
-        "chunk_duration": "1s",
-        "common_ref_removal": false,
+        "freq_min": 400.0,
+        "freq_max": 5000.0,
         "detect_sign": -1,
         "detect_threshold": 5,
-        "freq_max": 5000.0,
-        "freq_min": 400.0,
-        "max_threads_per_worker": 1,
-        "mp_context": "None",
-        "n_jobs": 1,
+        "common_ref_removal": false,
         "nested_params": "None",
         "pool_engine": "process",
-        "progress_bar": true
+        "n_jobs": 1,
+        "chunk_duration": "1s",
+        "progress_bar": true,
+        "mp_context": "None",
+        "max_threads_per_worker": 1
       }
     }
   }

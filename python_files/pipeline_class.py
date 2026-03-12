@@ -4,6 +4,7 @@ Created on Mon Feb  9 12:03:23 2026
 
 @author: WNIlabs
 """
+import json
 import os
 import copy
 from collections import OrderedDict
@@ -11,6 +12,46 @@ import spikeinterface.sorters as ss
 import spikeinterface.curation as scur
 import spikeinterface.preprocessing as spre
 import spikeinterface as si
+
+
+def _sanitize_sorter_params(sorter_name, params):
+    """
+    Ensure sorter params have correct types. Params that should be dicts but are
+    strings (e.g. from JSON serialization) are parsed or removed.
+    """
+    if not params:
+        return params
+    try:
+        defaults = ss.get_default_sorter_params(sorter_name)
+    except Exception:
+        defaults = {}
+    sanitized = {}
+    for key, val in params.items():
+        default_type = type(defaults.get(key)) if key in defaults else None
+        if isinstance(val, str) and default_type is dict:
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, dict):
+                    sanitized[key] = parsed
+                else:
+                    sanitized[key] = val
+            except (json.JSONDecodeError, TypeError):
+                pass  # skip invalid param
+        elif isinstance(val, str) and default_type is list:
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, list):
+                    sanitized[key] = parsed
+                else:
+                    sanitized[key] = val
+            except (json.JSONDecodeError, TypeError):
+                pass
+        elif key == "nested_params" and not isinstance(val, dict):
+            # tridesclous expects nested_params to be dict or None
+            pass
+        else:
+            sanitized[key] = val
+    return sanitized
 
 class Pipeline:
     """
@@ -86,11 +127,14 @@ class Pipeline:
         self._rhs_files._pre_processed_recording = rec
 
         # 3) Run sorter with the same recording object.
+        sorter_params = self._protocol_params.get("sorter_params", {}).get(self._sorter.name, {})
+        sorter_params = _sanitize_sorter_params(self._sorter.name, sorter_params)
         sorting_results = ss.run_sorter(
             sorter_name=self._sorter.name,
             recording=rec,
             folder=self._output_sorter_folder,
-            remove_existing_folder = True
+            remove_existing_folder=True,
+            **sorter_params,
         )
         
         # 4) Remove duplicated spikes and store curated sorting in rhs_files.

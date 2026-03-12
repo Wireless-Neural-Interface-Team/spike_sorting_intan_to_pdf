@@ -18,6 +18,7 @@ import os
 import json
 import time
 import copy
+import shutil
 from datetime import datetime
 import ctypes
 import threading
@@ -137,6 +138,8 @@ class PipelineGUI(QMainWindow):
         self._channels_load_thread = None
         self._channels_load_worker = None
         self._channels_debounce_timer = None
+        self._channels_id_cache = {}
+        self._channels_loading_key = None
         self._save_debounce_timer = None
         self._mea_editor_window = None
         self._probe_temp_path = None
@@ -237,7 +240,7 @@ class PipelineGUI(QMainWindow):
         left_layout.addWidget(self._probe_edit_btn, r, 2)
         left_layout.addWidget(
             self._make_info_badge(
-                "Probe loaded via MEA Editor. The pipeline uses the version displayed in the editor."
+                "Load/Edit: open MEA Editor. Unsaved probe is used by the pipeline."
             ),
             r,
             3,
@@ -346,111 +349,65 @@ class PipelineGUI(QMainWindow):
         self._protocol_params = copy.deepcopy(default)
 
         # --- Preprocessing group ---
-        preprocessing_group = QGroupBox("Protocol preprocessing")
-        preprocessing_group.setToolTip("")
-        preprocessing_layout = QGridLayout(preprocessing_group)
-        preprocessing_layout.setColumnStretch(1, 1)
-        preprocessing_layout.setColumnMinimumWidth(2, 16)
+        preprocessing_group = QGroupBox("Preprocessing")
+        preprocessing_group.setStyleSheet(
+            "QGroupBox { font-weight: bold; margin-top: 8px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+        )
+        preprocessing_main = QVBoxLayout(preprocessing_group)
+        preprocessing_main.setSpacing(8)
+        preprocessing_main.setContentsMargins(12, 16, 12, 12)
 
-        prep = 0
-        preprocessing_layout.addWidget(QLabel("Filter type"), prep, 0)
+        # Filter block: compact row
+        filter_frame = QFrame()
+        filter_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        filter_frame.setStyleSheet("QFrame { background-color: palette(base); border-radius: 4px; }")
+        filter_layout = QHBoxLayout(filter_frame)
+        filter_layout.setContentsMargins(10, 8, 10, 8)
+        filter_layout.setSpacing(12)
+        filter_layout.addWidget(QLabel("Filter:"))
         self.preproc_filter_choice_combo = QComboBox()
         self.preproc_filter_choice_combo.addItems(
             ["None", "bandpass_filter", "highpass_filter", "notch_filter", "gaussian_filter"]
         )
         self.preproc_filter_choice_combo.currentTextChanged.connect(self._on_filter_choice_changed)
-        preprocessing_layout.addWidget(self.preproc_filter_choice_combo, prep, 1)
-        preprocessing_layout.addWidget(
-            self._make_info_badge("Choose one filter family (exclusive)."),
-            prep,
-            2,
-        )
-        prep += 1
-
-        # Filter params: shown directly below filter type dropdown.
+        self.preproc_filter_choice_combo.setMinimumWidth(140)
+        filter_layout.addWidget(self.preproc_filter_choice_combo)
         self.preproc_filter_params_container = QWidget()
-        self.preproc_filter_params_layout = QVBoxLayout(self.preproc_filter_params_container)
+        self.preproc_filter_params_layout = QHBoxLayout(self.preproc_filter_params_container)
         self.preproc_filter_params_layout.setContentsMargins(0, 0, 0, 0)
-        self.preproc_filter_params_layout.setSpacing(4)
-        preprocessing_layout.addWidget(self.preproc_filter_params_container, prep, 0, 1, 3)
-        prep += 1
+        self.preproc_filter_params_layout.setSpacing(12)
+        filter_layout.addWidget(self.preproc_filter_params_container, 1)
+        filter_layout.addStretch()
+        preprocessing_main.addWidget(filter_frame)
 
-        self.preproc_steps_scroll = QScrollArea()
-        self.preproc_steps_scroll.setWidgetResizable(True)
-        self.preproc_steps_scroll.setMinimumHeight(320)
-        self.preproc_steps_scroll.setMaximumHeight(520)
-        self.preproc_steps_container = QWidget()
-        self.preproc_steps_layout = QGridLayout(self.preproc_steps_container)
-        self.preproc_steps_layout.setColumnStretch(0, 1)
-        self.preproc_steps_layout.setColumnMinimumWidth(1, 16)
-        row = 0
+        # Steps block: compact list
+        steps_frame = QFrame()
+        steps_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        steps_frame.setStyleSheet("QFrame { background-color: palette(base); border-radius: 4px; }")
+        self.preproc_steps_layout = QVBoxLayout(steps_frame)
+        self.preproc_steps_layout.setContentsMargins(10, 8, 10, 8)
+        self.preproc_steps_layout.setSpacing(6)
         for step_name in self._preprocessing_steps_order:
             if step_name in self._filter_steps:
-                # For filter steps, no checkbox row. Params are displayed under filter dropdown.
-                panel = QWidget()
-                panel_layout = QGridLayout(panel)
-                panel_layout.setColumnStretch(2, 1)
-                panel_layout.setContentsMargins(20, 0, 0, 0)
-                self._preproc_step_param_input_widgets[step_name] = {}
-                p_row = 0
-                for key, default_val in self._preprocessing_step_defaults.get(step_name, {}).items():
-                    label = QLabel(key)
-                    label.setToolTip("")
-                    panel_layout.addWidget(label, p_row, 0)
-                    panel_layout.addWidget(
-                        self._make_info_badge(f"Parameter '{key}' for '{step_name}'."),
-                        p_row,
-                        1,
-                    )
-                    w = self._create_preproc_param_widget(step_name, key, default_val)
-                    w.setToolTip("")
-                    self._preproc_step_param_input_widgets[step_name][key] = w
-                    panel_layout.addWidget(w, p_row, 2)
-                    p_row += 1
-                panel.setVisible(False)
+                panel, param_widgets = self._create_preproc_step_panel(step_name)
+                self._preproc_step_param_input_widgets[step_name] = param_widgets
                 self._preproc_step_params_widgets[step_name] = panel
                 self.preproc_filter_params_layout.addWidget(panel)
                 continue
-
-            cb = QCheckBox(step_name)
-            cb.setToolTip("")
-            cb.toggled.connect(lambda checked, s=step_name: self._on_preproc_step_toggled(s, checked))
-            self.preproc_steps_layout.addWidget(cb, row, 0)
-            self.preproc_steps_layout.addWidget(
-                self._make_info_badge(f"Enable preprocessing step '{step_name}'."),
-                row,
-                1,
-            )
-            self._preprocessing_step_enabled_widgets[step_name] = cb
-            row += 1
-
-            panel = QWidget()
-            panel_layout = QGridLayout(panel)
-            panel_layout.setColumnStretch(2, 1)
-            panel_layout.setContentsMargins(20, 0, 0, 0)
-            self._preproc_step_param_input_widgets[step_name] = {}
-            p_row = 0
-            for key, default_val in self._preprocessing_step_defaults.get(step_name, {}).items():
-                label = QLabel(key)
-                label.setToolTip("")
-                panel_layout.addWidget(label, p_row, 0)
-                panel_layout.addWidget(
-                    self._make_info_badge(f"Parameter '{key}' for '{step_name}'."),
-                    p_row,
-                    1,
-                )
-                w = self._create_preproc_param_widget(step_name, key, default_val)
-                w.setToolTip("")
-                self._preproc_step_param_input_widgets[step_name][key] = w
-                panel_layout.addWidget(w, p_row, 2)
-                p_row += 1
-            panel.setVisible(False)
+            panel, param_widgets = self._create_preproc_step_panel(step_name)
+            self._preproc_step_param_input_widgets[step_name] = param_widgets
             self._preproc_step_params_widgets[step_name] = panel
-            self.preproc_steps_layout.addWidget(panel, row, 0, 1, 3)
-            row += 1
-
-        self.preproc_steps_scroll.setWidget(self.preproc_steps_container)
-        preprocessing_layout.addWidget(self.preproc_steps_scroll, prep, 0, 1, 3)
+            step_row = QHBoxLayout()
+            step_row.setSpacing(8)
+            cb = QCheckBox(step_name.replace("_", " "))
+            cb.toggled.connect(lambda checked, s=step_name: self._on_preproc_step_toggled(s, checked))
+            self._preprocessing_step_enabled_widgets[step_name] = cb
+            step_row.addWidget(cb)
+            step_row.addWidget(panel, 1)
+            step_row.addStretch()
+            self.preproc_steps_layout.addLayout(step_row)
+        preprocessing_main.addWidget(steps_frame)
 
         protocol_main.addWidget(preprocessing_group)
 
@@ -623,8 +580,10 @@ class PipelineGUI(QMainWindow):
         # Logs (bottom-left)
         left_panel_layout.addWidget(QLabel("Logs"))
         self._progressbar = QProgressBar()
-        self._progressbar.setRange(0, 0)  # indeterminate
-        self._progressbar.setVisible(False)
+        # Always visible: idle state is determinate (not spinning).
+        self._progressbar.setRange(0, 1)
+        self._progressbar.setValue(0)
+        self._progressbar.setTextVisible(False)
         left_panel_layout.addWidget(self._progressbar)
 
         self.logs = QTextEdit()
@@ -903,6 +862,9 @@ class PipelineGUI(QMainWindow):
         try:
             with open(self._session_file, "r", encoding="utf-8") as f:
                 self._apply_form_state(json.load(f))
+            # No probe at launch: always start with empty probe.
+            self._probe_path = ""
+            self._update_probe_name_display()
         except Exception:
             pass
 
@@ -918,7 +880,7 @@ class PipelineGUI(QMainWindow):
             self._save_debounce_timer = QTimer(self)
             self._save_debounce_timer.setSingleShot(True)
             self._save_debounce_timer.timeout.connect(self._flush_save_last_session)
-        self._save_debounce_timer.start(400)
+        self._save_debounce_timer.start(300)
 
     def _flush_save_last_session(self):
         """Called when debounce timer fires; also used for immediate save."""
@@ -951,7 +913,9 @@ class PipelineGUI(QMainWindow):
     def closeEvent(self, event):
         self._stop_mea_editor_sync_timer()
         if MEA_EDITOR_AVAILABLE and self._mea_editor_window is not None:
+            self._mea_editor_window._force_close = True
             self._mea_editor_window.close()
+            self._mea_editor_window = None
         self._save_last_session(immediate=True)
         event.accept()
 
@@ -966,13 +930,38 @@ class PipelineGUI(QMainWindow):
         self._channels_debounce_timer = QTimer(self)
         self._channels_debounce_timer.setSingleShot(True)
         self._channels_debounce_timer.timeout.connect(self._refresh_intan_channels)
-        self._channels_debounce_timer.start(400)
+        self._channels_debounce_timer.start(200)
+
+    def _normalize_folder_key(self, path):
+        """Normalized key for folder cache and stale-load checks."""
+        p = (path or "").strip()
+        if not p:
+            return ""
+        try:
+            return os.path.normcase(os.path.abspath(p))
+        except Exception:
+            return p
 
     def _refresh_intan_channels(self):
         """Start background load of channel IDs (non-blocking)."""
         folder_path = self.folder_edit.text().strip()
+        folder_key = self._normalize_folder_key(folder_path)
         self._populate_channels_table([])
         if not folder_path or not os.path.isdir(folder_path):
+            self._channels_loading_key = None
+            return
+        # Instant display when already loaded once for this folder.
+        cached = self._channels_id_cache.get(folder_key)
+        if cached is not None:
+            self._populate_channels_table(cached)
+            return
+        # Avoid duplicate background loads for the same folder.
+        if (
+            self._channels_loading_key == folder_key
+            and self._channels_load_thread is not None
+            and self._channels_load_thread.isRunning()
+        ):
+            self._populate_channels_table(None)
             return
         self._populate_channels_table(None)  # show "Loading..."
         worker = ChannelsLoaderWorker(folder_path)
@@ -984,10 +973,17 @@ class PipelineGUI(QMainWindow):
         thread.start()
         self._channels_load_thread = thread
         self._channels_load_worker = worker
+        self._channels_loading_key = folder_key
 
     def _on_channels_loaded(self, folder_path, channel_ids):
         """Called when channel load completes (on main thread). Ignore stale results."""
-        if folder_path != self.folder_edit.text().strip():
+        loaded_key = self._normalize_folder_key(folder_path)
+        current_key = self._normalize_folder_key(self.folder_edit.text())
+        if loaded_key:
+            self._channels_loading_key = None
+        if channel_ids is not None:
+            self._channels_id_cache[loaded_key] = channel_ids
+        if loaded_key != current_key:
             return
         self._populate_channels_table(channel_ids)
 
@@ -1026,9 +1022,30 @@ class PipelineGUI(QMainWindow):
     def _set_probe_path(self, path):
         """Store probe path and display only the filename."""
         self._probe_path = path.strip() if path else ""
-        name = os.path.basename(self._probe_path) if self._probe_path else ""
-        self.probe_name_display.setText(name)
+        self._update_probe_name_display()
         self._save_last_session()
+
+    def _is_mea_editor_dirty(self):
+        """Best-effort dirty flag check across mea-editor versions."""
+        if not (MEA_EDITOR_AVAILABLE and self._mea_editor_window is not None):
+            return False
+        dirty = getattr(self._mea_editor_window, "is_dirty", None)
+        if dirty is None:
+            dirty = getattr(self._mea_editor_window, "_is_dirty", False)
+        return bool(dirty)
+
+    def _update_probe_name_display(self):
+        """Update probe filename display, with '*' when editor has unsaved changes."""
+        base = os.path.basename(self._probe_path) if self._probe_path else ""
+        if MEA_EDITOR_AVAILABLE and self._mea_editor_window is not None:
+            path = getattr(self._mea_editor_window, "current_file_path", None) or getattr(self._mea_editor_window, "_initial_path", "")
+            if path:
+                base = os.path.basename(path)
+            elif list(getattr(self._mea_editor_window, "electrodes", {}).values()):
+                base = "(unsaved probe)"
+        if self._is_mea_editor_dirty() and base:
+            base = f"{base} *"
+        self.probe_name_display.setText(base)
 
     def _on_probe_path_changed(self):
         """Reload MEA editor if open and path changed."""
@@ -1064,25 +1081,30 @@ class PipelineGUI(QMainWindow):
         self._mea_editor_window.show()
         self._mea_editor_window.raise_()
         self._mea_editor_window.activateWindow()
+        self._update_probe_name_display()
         self._start_mea_editor_sync_timer()
 
     def _on_probe_file_loaded(self, path):
         """Called when a probe file is loaded in MEA Editor (immediate update)."""
         if path and os.path.isfile(path):
             self._set_probe_path(path)
+        else:
+            self._update_probe_name_display()
 
     def _on_mea_editor_closed(self, path):
-        """Called when MEA Editor is closed, with the path of the loaded probe (if any)."""
+        """Called when user hides MEA Editor (clicks X). Window stays alive, content preserved."""
         self._stop_mea_editor_sync_timer()
         if path and os.path.isfile(path):
             self._set_probe_path(path)
+        else:
+            self._update_probe_name_display()
 
     def _start_mea_editor_sync_timer(self):
         """Start timer to sync probe display with MEA Editor state (modifications)."""
         self._stop_mea_editor_sync_timer()
         self._mea_editor_sync_timer = QTimer(self)
         self._mea_editor_sync_timer.timeout.connect(self._sync_probe_display_from_mea_editor)
-        self._mea_editor_sync_timer.start(1500)
+        self._mea_editor_sync_timer.start(500)
 
     def _stop_mea_editor_sync_timer(self):
         """Stop the MEA Editor sync timer."""
@@ -1098,26 +1120,22 @@ class PipelineGUI(QMainWindow):
         if not self._mea_editor_window.isVisible():
             self._stop_mea_editor_sync_timer()
             return
-        path = getattr(self._mea_editor_window, "current_file_path", None) or self._mea_editor_window._initial_path
-        base = os.path.basename(path) if path else ""
-        if not base and list(self._mea_editor_window.electrodes.values()):
-            base = "(unsaved probe)"
-        dirty = getattr(self._mea_editor_window, "is_dirty", False)
-        self.probe_name_display.setText(f"{base} *" if dirty and base else base)
+        self._update_probe_name_display()
 
     def _get_probe_path_for_pipeline(self, folder_path=None):
         """
         Return the probe file path to use for the pipeline.
         If MEA editor was opened and has content, ALWAYS export current state (all modifications)
-        to a file in the recording folder so the subprocess can read it reliably.
+        to a file in the output folder so the subprocess can read it reliably.
         """
         if MEA_EDITOR_AVAILABLE and self._mea_editor_window is not None:
             electrodes = list(self._mea_editor_window.electrodes.values())
             if electrodes and folder_path and os.path.isdir(folder_path):
                 try:
-                    path = os.path.join(folder_path, "probe_pipeline_temp.json")
+                    # Save directly as final run artifact (no temp probe file).
+                    path = os.path.join(folder_path, "probe_used.json")
                     save_electrodes_to_file(path, electrodes, self._mea_editor_window.si_units)
-                    self._probe_temp_path = path
+                    self._probe_temp_path = None
                     self._last_probe_from_mea_editor = True
                     return path
                 except Exception as exc:
@@ -1137,6 +1155,37 @@ class PipelineGUI(QMainWindow):
         if selected:
             target_edit.setText(selected)
             self._save_last_session()
+
+    def _create_preproc_step_panel(self, step_name):
+        """Create a compact panel with param widgets. Returns (panel, param_widgets_dict)."""
+        panel = QWidget()
+        defaults = self._preprocessing_step_defaults.get(step_name, {})
+        is_filter = step_name in self._filter_steps
+        param_widgets = {}
+        if is_filter:
+            layout = QHBoxLayout(panel)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(8)
+            for key, default_val in defaults.items():
+                layout.addWidget(QLabel(key + ":"))
+                w = self._create_preproc_param_widget(step_name, key, default_val)
+                w.setMaximumWidth(90)
+                param_widgets[key] = w
+                layout.addWidget(w)
+            layout.addStretch()
+        else:
+            layout = QHBoxLayout(panel)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(8)
+            for key, default_val in defaults.items():
+                layout.addWidget(QLabel(key + ":"))
+                w = self._create_preproc_param_widget(step_name, key, default_val)
+                w.setMaximumWidth(100)
+                param_widgets[key] = w
+                layout.addWidget(w)
+            layout.addStretch()
+        panel.setVisible(False)
+        return panel, param_widgets
 
     def _create_preproc_param_widget(self, step_name, param_name, default_val):
         options = self._preprocessing_step_param_options.get(step_name, {}).get(param_name)
@@ -1474,7 +1523,13 @@ class PipelineGUI(QMainWindow):
         self.progress_signal.emit(running)
 
     def _progress_impl(self, visible):
-        self._progressbar.setVisible(visible)
+        if visible:
+            # Running: indeterminate busy animation.
+            self._progressbar.setRange(0, 0)
+        else:
+            # Idle: keep bar visible but not animated.
+            self._progressbar.setRange(0, 1)
+            self._progressbar.setValue(0)
 
     def _open_output_folder(self, folder_path):
         if os.path.isdir(folder_path):
@@ -1579,6 +1634,15 @@ class PipelineGUI(QMainWindow):
             return
         if self._last_probe_from_mea_editor:
             self._log("Probe used: current version from MEA Editor (including modifications).")
+        try:
+            self._save_run_context_files(params["output_folder"], params)
+        except Exception as exc:
+            self._set_run_button_state(True)
+            self._show_error(
+                "Save failed",
+                f"Could not save probe/settings to output folder:\n{exc}",
+            )
+            return
         self._set_form_enabled(False)  # Lock form while pipeline runs
         # Queue for inter-process communication (child -> parent)
         self._log_queue = multiprocessing.Queue()
@@ -1603,9 +1667,6 @@ class PipelineGUI(QMainWindow):
             use_trigger = self.use_trigger_cb.isChecked()
             sorter_name = self.sorter_combo.currentText().strip()
             protocol_params = self._protocol_params
-            bandpass = protocol_params.get("preprocessing", {}).get("bandpass_filter", {})
-            min_freq = float(bandpass.get("freq_min", 400))
-            max_freq = float(bandpass.get("freq_max", 5000))
             trigger_threshold = None
             trigger_edge = None
             trigger_min_interval = None
@@ -1626,10 +1687,6 @@ class PipelineGUI(QMainWindow):
             my_probe_path = self._get_probe_path_for_pipeline(output_folder)
             if not my_probe_path or not os.path.isfile(my_probe_path):
                 raise ValueError("Probe file is missing or does not exist. Load a probe via MEA Editor first.")
-            if min_freq <= 0 or max_freq <= 0:
-                raise ValueError("protocol min_freq and max_freq must be > 0.")
-            if min_freq >= max_freq:
-                raise ValueError("protocol min_freq must be < max_freq.")
             if use_trigger:
                 if trigger_edge not in (-1, 1):
                     raise ValueError("trigger polarity must be 'Rising Edge' or 'Falling Edge'.")
@@ -1644,8 +1701,6 @@ class PipelineGUI(QMainWindow):
                 "sorter_name": sorter_name,
                 "my_probe_path": my_probe_path,
                 "protocol_params": protocol_params,
-                "min_freq": min_freq,
-                "max_freq": max_freq,
                 "trigger_threshold": trigger_threshold,
                 "trigger_edge": trigger_edge,
                 "trigger_min_interval": trigger_min_interval,
@@ -1655,6 +1710,25 @@ class PipelineGUI(QMainWindow):
         except Exception as exc:
             self._log(f"Validation error: {exc}")
             return None
+
+    def _save_run_context_files(self, output_folder, pipeline_params):
+        """Save probe and settings snapshots in the run output folder."""
+        os.makedirs(output_folder, exist_ok=True)
+
+        params_path = os.path.join(output_folder, "pipeline_params_used.json")
+        with open(params_path, "w", encoding="utf-8") as f:
+            json.dump(pipeline_params, f, indent=2, ensure_ascii=True)
+
+        probe_path = pipeline_params.get("my_probe_path", "")
+        if probe_path and os.path.isfile(probe_path):
+            _, ext = os.path.splitext(probe_path)
+            probe_copy_path = os.path.join(output_folder, f"probe_used{ext or '.json'}")
+            if os.path.abspath(probe_path) != os.path.abspath(probe_copy_path):
+                shutil.copy2(probe_path, probe_copy_path)
+
+        self._log(
+            "Saved run context files: pipeline_params_used.json, probe_used.*"
+        )
 
     def _queue_reader_loop(self):
         """

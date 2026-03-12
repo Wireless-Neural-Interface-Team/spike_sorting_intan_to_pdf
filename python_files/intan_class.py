@@ -4,21 +4,31 @@ Created on Fri Feb  6 10:16:39 2026
 
 @author: WNIlabs
 """
+from pathlib import Path
+
 import numpy as np
 import spikeinterface.extractors as se
 import probeinterface as ProbeI
-from probe_class import Probe
 
 
 def load_channel_ids_only(folder_path):
     """
-    Lightweight load: only the amplifier stream, to get channel_ids.
-    Avoids loading Stim and ADC streams. Returns list of channel IDs or None on error.
+    Lightweight load: reads only the first Intan file in the folder to get channel_ids.
+    All split files in a session share the same channel configuration, so one file
+    is sufficient. Much faster than loading the entire folder with read_split_intan_files.
+    Returns list of channel IDs or None on error.
     """
     try:
-        rec = se.read_split_intan_files(
-            folder_path,
-            mode="concatenate",
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            return None
+        file_list = [p for p in folder.iterdir() if p.suffix.lower() in [".rhd", ".rhs"]]
+        if not file_list:
+            return None
+        file_list.sort(key=lambda x: x.name)
+        first_file = file_list[0]
+        rec = se.read_intan(
+            first_file,
             stream_name="RHS2000 amplifier channel",
             use_names_as_ids=False,
             all_annotations=True,
@@ -50,7 +60,6 @@ class IntanFile:
         self.channel_ids = None
         
         # SpikeInterface recording extractors by stream.
-        self._digital_input_channel_recording = None
         self._adc_channel_recording = None
         self._amplifier_channel_recording = None
         
@@ -74,8 +83,7 @@ class IntanFile:
         """
         Load Intan split files into SpikeInterface recording extractors.
 
-        Three streams are loaded:
-          - Stim channel,
+        Two streams are loaded:
           - USB board ADC input channel,
           - RHS2000 amplifier channel.
         """
@@ -84,14 +92,6 @@ class IntanFile:
         all_annotations = True
         use_names_as_ids = False
         
-        # Read digital stim channel stream.
-        self._digital_input_channel_recording = se.read_split_intan_files(
-            self.folder_path,
-            mode=mode,
-            stream_name="Stim channel",
-            use_names_as_ids=use_names_as_ids,
-            all_annotations=all_annotations,
-        )
         # Read ADC stream (used for trigger detection in this project).
         self._adc_channel_recording = se.read_split_intan_files(
             self.folder_path,
@@ -112,12 +112,6 @@ class IntanFile:
         self.channel_ids = self._amplifier_channel_recording.get_channel_ids()
         self.number_of_channels = self._amplifier_channel_recording.get_num_channels()
         self.number_of_segments = self._amplifier_channel_recording.get_num_segments()
-        
-        print("Channel ids:", self.channel_ids )
-        print("Sampling frequency:", self.frequency )
-        print("Number of channels:", self.number_of_channels)
-        print("Number of segments:", self.number_of_segments)
-        
         # Keep raw amplifier recording; unsigned_to_signed is handled by protocol preprocessing.
     
 
@@ -163,7 +157,6 @@ class IntanFile:
             trigger_timestamps = np.array(kept_timestamps)
 
         self.trigger_timestamps = trigger_timestamps
-        print(f"\n{len(self.trigger_timestamps)} passages au-dessus du seuil détectés.")
     
     def associate_probe (self, probe):
         """
@@ -193,13 +186,8 @@ class IntanFile:
                 "Vérifiez le mapping des 'contact_ids' ou la sélection des canaux."
             )
         probe_df = probe_df.sort_values(by="device_channel_indices")
-        #Renumerotation des device_channel_indices because python starts from 0
-        #If you remove the next line, python will show you an error showing that the device_channnel
-        #are used to work with the recording channels.
-        #It will take the device channel indice of the probe and use it as the indexto find the recording channel 
-        probe_df["device_channel_indices"] = range(len(probe_df)) 
-        probe_df.to_csv("probe_dataframe_dump.txt", sep="\t", index=False)
-
+        # Renumber device_channel_indices (0-based) for SpikeInterface recording channel mapping.
+        probe_df["device_channel_indices"] = range(len(probe_df))
 
         # Build probe object and attach to recording.
         self._probe = ProbeI.Probe.from_dataframe(probe_df)
