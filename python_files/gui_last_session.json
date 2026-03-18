@@ -6,8 +6,8 @@
   "trigger_polarity": "Falling Edge",
   "trigger_min_interval": "5.1",
   "trigger_channel_index": "0",
-  "sorter_name": "spykingcircus2",
-  "my_probe_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Recordings/20260305/MEA_RdLGN64.json",
+  "sorter_name": "tridesclous2",
+  "my_probe_path": "",
   "protocol_params": {
     "preprocessing": {
       "unsigned_to_signed": {
@@ -156,59 +156,6 @@
         "debug": false
       },
       "kilosort4": {
-        "batch_size": 60000,
-        "nblocks": 1,
-        "Th_universal": 9,
-        "Th_learned": 8,
-        "nt": 61,
-        "shift": null,
-        "scale": null,
-        "batch_downsampling": 1,
-        "artifact_threshold": 1000000000.0,
-        "nskip": 25,
-        "whitening_range": 32,
-        "highpass_cutoff": 300,
-        "binning_depth": 5,
-        "sig_interp": 20,
-        "drift_smoothing": [
-          0.5,
-          0.5,
-          0.5
-        ],
-        "nt0min": null,
-        "dmin": null,
-        "dminx": 32,
-        "min_template_size": 10,
-        "template_sizes": 5,
-        "nearest_chans": 10,
-        "nearest_templates": 100,
-        "max_channel_distance": 32,
-        "max_peels": 100,
-        "templates_from_data": true,
-        "n_templates": 6,
-        "n_pcs": 6,
-        "Th_single_ch": 6,
-        "acg_threshold": 0.2,
-        "ccg_threshold": 0.25,
-        "cluster_neighbors": 10,
-        "cluster_downsampling": 20,
-        "max_cluster_subset": 25000,
-        "x_centers": null,
-        "cluster_init_seed": 5,
-        "duplicate_spike_ms": 0.25,
-        "position_limit": 100,
-        "do_CAR": true,
-        "invert_sign": false,
-        "save_extra_vars": false,
-        "save_preprocessed_copy": false,
-        "torch_device": "auto",
-        "bad_channels": null,
-        "clear_cache": false,
-        "do_correction": true,
-        "skip_kilosort_preprocessing": false,
-        "keep_good_only": false,
-        "use_binary_file": true,
-        "delete_recording_dat": true,
         "pool_engine": "process",
         "n_jobs": 1,
         "chunk_duration": "1s",
@@ -602,6 +549,60 @@
         "filtering": "{\"freq_min\": 300, \"freq_max\": 8000.0}",
         "job_kwargs": "{\"n_jobs\": -1, \"chunk_duration\": \"1s\"}",
         "waveforms": "{\"ms_before\": 1.0, \"ms_after\": 1.5}"
+      },
+      "tridesclous2": {
+        "apply_preprocessing": true,
+        "apply_motion_correction": false,
+        "motion_correction": {
+          "preset": "dredge_fast"
+        },
+        "cache_preprocessing": {
+          "mode": "memory",
+          "memory_limit": 0.5,
+          "delete_cache": true
+        },
+        "waveforms": {
+          "ms_before": 0.5,
+          "ms_after": 1.5,
+          "radius_um": 120.0
+        },
+        "filtering": {
+          "freq_min": 150.0,
+          "freq_max": 6000.0,
+          "ftype": "bessel",
+          "filter_order": 2
+        },
+        "detection": {
+          "peak_sign": "neg",
+          "detect_threshold": 5,
+          "exclude_sweep_ms": 1.5,
+          "radius_um": 150.0
+        },
+        "selection": {
+          "n_peaks_per_channel": 5000,
+          "min_n_peaks": 20000
+        },
+        "svd": {
+          "n_components": 10
+        },
+        "clustering": {
+          "recursive_depth": 3
+        },
+        "templates": {
+          "ms_before": 2.0,
+          "ms_after": 3.0,
+          "max_spikes_per_unit": 400,
+          "sparsity_threshold": 1.5,
+          "min_snr": 2.5
+        },
+        "matching": {
+          "method": "tdc-peeler",
+          "method_kwargs": {},
+          "gather_mode": "memory"
+        },
+        "job_kwargs": {},
+        "save_array": true,
+        "debug": false
       }
     }
   }

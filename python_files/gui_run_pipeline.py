@@ -810,7 +810,7 @@ class PipelineGUI(QMainWindow):
         for w in self._trigger_widgets:
             w.setEnabled(enabled)
 
-    _ALLOWED_SORTERS = ("kilosort4", "spykingcircus", "spykingcircus2", "tridesclous", "tridesclous2", "simple")
+    _ALLOWED_SORTERS = ("kilosort4", "spykingcircus", "spykingcircus2", "tridesclous", "tridesclous2", "lupin", "simple")
 
     def _populate_sorter_combo(self):
         """Fill sorter combo with allowed sorters from SpikeInterface."""
