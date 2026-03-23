@@ -8,6 +8,8 @@ Created on Fri Feb  6 10:13:49 2026
 import spikeinterface.widgets as sw
 import os
 from pprint import pformat
+
+from protocol_class import get_preprocessing_filter_freqs
 import textwrap
 import numpy as np
 import matplotlib.pyplot as plt
@@ -126,7 +128,16 @@ class PDFGenerator:
 
         protocol_pre = pformat(protocol_params.get("preprocessing", {}), width=100, compact=False)
         protocol_post_keys = list(protocol_params.get("postprocessing", {}).keys())
-        bandpass = protocol_params.get("preprocessing", {}).get("bandpass_filter", {})
+        pre = protocol_params.get("preprocessing", {})
+        ft, fmin, fmax = get_preprocessing_filter_freqs(pre)
+        if ft == "highpass":
+            filter_summary = f"- Preprocessing filter: highpass, cutoff (Hz): {fmin}"
+        elif ft == "lowpass":
+            filter_summary = f"- Preprocessing filter: lowpass (Gaussian), cutoff (Hz): {fmax}"
+        else:
+            filter_summary = (
+                f"- Preprocessing filter: bandpass, min/max (Hz): {fmin} / {fmax}"
+            )
 
         channel_count = len(rhs.channel_ids) if rhs.channel_ids is not None else 0
         channel_ids_full = ", ".join(map(str, rhs.channel_ids)) if channel_count else "N/A"
@@ -144,7 +155,7 @@ class PDFGenerator:
             "",
             "[1] Protocol",
             f"- Protocol file path: {protocol_params.get('_file_path', 'N/A')}",
-            f"- Bandpass min/max (Hz): {bandpass.get('freq_min', 'N/A')} / {bandpass.get('freq_max', 'N/A')}",
+            filter_summary,
             f"- Preprocessing config: {protocol_pre}",
             f"- Postprocessing steps ({len(protocol_post_keys)}): {', '.join(protocol_post_keys)}",
             "",

@@ -11,6 +11,9 @@ import spikeinterface.curation as scur
 import spikeinterface.preprocessing as spre
 import spikeinterface as si
 
+from protocol_class import preprocessing_dict_for_spikeinterface
+
+
 class Pipeline:
     """
     End-to-end processing pipeline for one recording and one sorter.
@@ -53,9 +56,10 @@ class Pipeline:
         Run preprocessing, sorter execution, curation, and analyzer computation.
         """
         # 1) Apply preprocessing and keep a single local recording object.
+        prep_si = preprocessing_dict_for_spikeinterface(self._protocol_params["preprocessing"])
         rec = spre.apply_preprocessing_pipeline(
             self._rhs_files._signed_amplifier_channel_recording,
-            self._protocol_params['preprocessing'],
+            prep_si,
         )
         # 2) Re-attach probe after preprocessing when available.
         if getattr(self._rhs_files, "_probe", None) is not None:

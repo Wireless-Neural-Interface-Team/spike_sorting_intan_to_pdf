@@ -70,7 +70,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtGui import QAction
 
-from protocol_class import default_protocol_params
+from protocol_class import (
+    apply_preprocessing_filter_to_dict,
+    default_protocol_params,
+    get_preprocessing_filter_freqs,
+)
 
 try:
     from spikeinterface.sorters import available_sorters
@@ -272,7 +276,21 @@ class PipelineGUI(QMainWindow):
         preprocessing_layout.setColumnStretch(1, 1)
 
         prep = 0
-        preprocessing_layout.addWidget(QLabel("Bandpass freq min (Hz)"), prep, 0)
+        preprocessing_layout.addWidget(QLabel("Filter type"), prep, 0)
+        self.protocol_filter_type = QComboBox()
+        for text, data in (
+            ("Bandpass", "bandpass"),
+            ("Highpass", "highpass"),
+            ("Lowpass (Gaussian)", "lowpass"),
+        ):
+            self.protocol_filter_type.addItem(text, data)
+        self.protocol_filter_type.setMaximumWidth(200)
+        self.protocol_filter_type.currentIndexChanged.connect(self._on_preprocessing_filter_type_changed)
+        preprocessing_layout.addWidget(self.protocol_filter_type, prep, 1)
+        prep += 1
+
+        self._prep_freq_min_label = QLabel("Bandpass freq min (Hz)")
+        preprocessing_layout.addWidget(self._prep_freq_min_label, prep, 0)
         self.protocol_freq_min = QDoubleSpinBox()
         self.protocol_freq_min.setRange(1, 20000)
         self.protocol_freq_min.setValue(400)
@@ -282,7 +300,8 @@ class PipelineGUI(QMainWindow):
         preprocessing_layout.addWidget(self.protocol_freq_min, prep, 1)
         prep += 1
 
-        preprocessing_layout.addWidget(QLabel("Bandpass freq max (Hz)"), prep, 0)
+        self._prep_freq_max_label = QLabel("Bandpass freq max (Hz)")
+        preprocessing_layout.addWidget(self._prep_freq_max_label, prep, 0)
         self.protocol_freq_max = QDoubleSpinBox()
         self.protocol_freq_max.setRange(1, 20000)
         self.protocol_freq_max.setValue(5000)
@@ -291,6 +310,7 @@ class PipelineGUI(QMainWindow):
         self.protocol_freq_max.valueChanged.connect(self._update_protocol_from_form)
         preprocessing_layout.addWidget(self.protocol_freq_max, prep, 1)
 
+        self._sync_preprocessing_filter_widgets()
         protocol_main.addWidget(preprocessing_group)
 
         # --- Postprocessing group ---
@@ -414,8 +434,7 @@ class PipelineGUI(QMainWindow):
         controls.addWidget(self._clear_logs_btn)
         self._launch_sigui_btn = QPushButton("Launch spikeinterface-gui")
         self._launch_sigui_btn.setFixedWidth(210)
-        self._launch_sigui_btn.setEnabled(False)
-        self._launch_sigui_btn.clicked.connect(self._launch_spikeinterface_gui)
+        self._launch_sigui_btn.clicked.connect(self._prompt_and_launch_spikeinterface_gui)
         controls.addWidget(self._launch_sigui_btn)
         controls.addStretch()
         main_layout.addLayout(controls)
@@ -767,8 +786,13 @@ class PipelineGUI(QMainWindow):
     def _update_protocol_from_form(self):
         """Met à jour le dictionnaire protocol à chaque modification d'un champ."""
         p = self._protocol_params
-        p.setdefault("preprocessing", {}).setdefault("bandpass_filter", {})["freq_min"] = self.protocol_freq_min.value()
-        p.setdefault("preprocessing", {}).setdefault("bandpass_filter", {})["freq_max"] = self.protocol_freq_max.value()
+        prep = p.setdefault("preprocessing", {})
+        apply_preprocessing_filter_to_dict(
+            prep,
+            self.protocol_filter_type.currentData() or "bandpass",
+            self.protocol_freq_min.value(),
+            self.protocol_freq_max.value(),
+        )
         p.setdefault("postprocessing", {}).setdefault("unit_locations", {})["method"] = self.protocol_unit_locations_method.currentText()
         p.setdefault("postprocessing", {}).setdefault("random_spikes", {})["max_spikes_per_unit"] = self.protocol_random_spikes_max.value()
         p.setdefault("postprocessing", {}).setdefault("waveforms", {})["ms_before"] = self.protocol_waveforms_ms_before.value()
@@ -783,6 +807,7 @@ class PipelineGUI(QMainWindow):
     def _get_protocol_form_widgets(self):
         """Liste des widgets protocol pour blockSignals."""
         return [
+            self.protocol_filter_type,
             self.protocol_freq_min, self.protocol_freq_max, self.protocol_unit_locations_method,
             self.protocol_random_spikes_max, self.protocol_waveforms_ms_before, self.protocol_waveforms_ms_after,
             self.protocol_correlograms_window, self.protocol_correlograms_bin,
@@ -795,9 +820,17 @@ class PipelineGUI(QMainWindow):
         widgets = self._get_protocol_form_widgets()
         for w in widgets:
             w.blockSignals(True)
-        bp = params.get("preprocessing", {}).get("bandpass_filter", {})
-        self.protocol_freq_min.setValue(float(bp.get("freq_min", 400)))
-        self.protocol_freq_max.setValue(float(bp.get("freq_max", 5000)))
+        prep = params.get("preprocessing", {})
+        ft = prep.get("filter_type", "bandpass")
+        idx = self.protocol_filter_type.findData(ft)
+        if idx >= 0:
+            self.protocol_filter_type.setCurrentIndex(idx)
+        else:
+            self.protocol_filter_type.setCurrentIndex(0)
+        self._sync_preprocessing_filter_widgets()
+        _ft, fmin, fmax = get_preprocessing_filter_freqs(prep)
+        self.protocol_freq_min.setValue(float(fmin))
+        self.protocol_freq_max.setValue(float(fmax))
         ul = params.get("postprocessing", {}).get("unit_locations", {})
         method = ul.get("method", "center_of_mass") if isinstance(ul, dict) else "center_of_mass"
         idx = self.protocol_unit_locations_method.findText(method)
@@ -855,6 +888,34 @@ class PipelineGUI(QMainWindow):
     def _clear_logs(self):
         self.logs.clear()
 
+    def _on_preprocessing_filter_type_changed(self):
+        self._sync_preprocessing_filter_widgets()
+        self._update_protocol_from_form()
+
+    def _sync_preprocessing_filter_widgets(self):
+        ft = self.protocol_filter_type.currentData()
+        if ft is None:
+            ft = "bandpass"
+        if ft == "bandpass":
+            self._prep_freq_min_label.setText("Bandpass freq min (Hz)")
+            self._prep_freq_max_label.setText("Bandpass freq max (Hz)")
+            self._prep_freq_min_label.setVisible(True)
+            self.protocol_freq_min.setVisible(True)
+            self._prep_freq_max_label.setVisible(True)
+            self.protocol_freq_max.setVisible(True)
+        elif ft == "highpass":
+            self._prep_freq_min_label.setText("Highpass cutoff (Hz)")
+            self._prep_freq_min_label.setVisible(True)
+            self.protocol_freq_min.setVisible(True)
+            self._prep_freq_max_label.setVisible(False)
+            self.protocol_freq_max.setVisible(False)
+        else:
+            self._prep_freq_max_label.setText("Lowpass cutoff (Hz)")
+            self._prep_freq_min_label.setVisible(False)
+            self.protocol_freq_min.setVisible(False)
+            self._prep_freq_max_label.setVisible(True)
+            self.protocol_freq_max.setVisible(True)
+
     def _get_spikeinterface_results_path(self, output_folder):
         """Resolve best results path for spikeinterface-gui from an output folder."""
         if not output_folder or not os.path.isdir(output_folder):
@@ -868,19 +929,75 @@ class PipelineGUI(QMainWindow):
             return sorting_dir
         return output_folder
 
+    def _prompt_and_launch_spikeinterface_gui(self):
+        """Propose le dossier du dernier pipeline ou la sélection d'un dossier, puis lance sigui."""
+        pipeline_path = self._last_success_results_path
+        pipeline_ok = (
+            self._has_successful_pipeline
+            and pipeline_path
+            and os.path.isdir(pipeline_path)
+        )
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("SpikeInterface GUI")
+        msg.setText("Quel dossier SortingAnalyzer ouvrir dans spikeinterface-gui ?")
+        btn_pipeline = None
+        if pipeline_ok:
+            msg.setInformativeText(f"Dossier issu du dernier pipeline :\n{pipeline_path}")
+            btn_pipeline = msg.addButton(
+                "Utiliser le résultat du pipeline",
+                QMessageBox.AcceptRole,
+            )
+        else:
+            msg.setInformativeText(
+                "Aucun résultat de pipeline disponible pour l'instant — "
+                "choisissez un dossier sur le disque."
+            )
+        btn_browse = msg.addButton("Choisir un dossier…", QMessageBox.ActionRole)
+        btn_cancel = msg.addButton("Annuler", QMessageBox.RejectRole)
+        msg.setDefaultButton(btn_pipeline or btn_browse)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is None or clicked == btn_cancel:
+            return
+        if btn_pipeline is not None and clicked == btn_pipeline:
+            self._launch_spikeinterface_gui(pipeline_path)
+            return
+        if clicked == btn_browse:
+            start_dir = pipeline_path if pipeline_ok else self.folder_edit.text().strip() or ""
+            folder = QFileDialog.getExistingDirectory(
+                self,
+                "Dossier SortingAnalyzer",
+                start_dir,
+            )
+            if folder:
+                self._launch_spikeinterface_gui(folder)
+
     def _launch_spikeinterface_gui(self, results_path=None):
         """Launch spikeinterface-gui in a separate process."""
         target_path = results_path or self._last_success_results_path
         if not target_path:
             self._show_info(
                 "SpikeInterface GUI",
-                "No successful pipeline result available yet. Run a complete pipeline first.",
+                "Aucun dossier à ouvrir.",
             )
             return
-        launch_attempts = [
-            ["spikeinterface-gui", target_path],
-            [sys.executable, "-m", "spikeinterface_gui", target_path],
-        ]
+        scripts_dir = os.path.dirname(sys.executable)
+        sigui_exe = os.path.join(
+            scripts_dir, "sigui.exe" if sys.platform == "win32" else "sigui"
+        )
+        # pip installs the CLI as `sigui` only; there is no `python -m spikeinterface_gui`.
+        py_sigui = (
+            "from spikeinterface_gui.main import run_mainwindow_cli; "
+            "import sys; "
+            f"sys.argv = ['sigui', {repr(target_path)}]; "
+            "run_mainwindow_cli()"
+        )
+        launch_attempts = []
+        if os.path.isfile(sigui_exe):
+            launch_attempts.append([sigui_exe, target_path])
+        launch_attempts.append(["sigui", target_path])
+        launch_attempts.append([sys.executable, "-c", py_sigui])
         errors = []
         for command in launch_attempts:
             try:
@@ -892,8 +1009,8 @@ class PipelineGUI(QMainWindow):
             except Exception as exc:
                 errors.append(str(exc))
         self._show_error(
-            "Unable to launch spikeinterface-gui",
-            "Could not start spikeinterface-gui.\n"
+            "Unable to launch SpikeInterface GUI",
+            "Could not start the GUI (console command: sigui).\n"
             "Install it in the current environment with:\n"
             "pip install spikeinterface-gui\n\n"
             f"Details:\n{errors[-1] if errors else 'Unknown launch error.'}",
@@ -908,7 +1025,7 @@ class PipelineGUI(QMainWindow):
         """Enable/disable all form fields. Disabled when pipeline is running."""
         for w in self._form_widgets:
             w.setEnabled(enabled)
-        self._launch_sigui_btn.setEnabled(enabled and self._has_successful_pipeline)
+        self._launch_sigui_btn.setEnabled(enabled)
         if enabled:
             self._toggle_trigger_fields_state()  # Restore trigger fields state
 
@@ -1009,8 +1126,6 @@ class PipelineGUI(QMainWindow):
             self._open_output_folder(folder_path)
         except Exception:
             pass
-        self._log("Opening spikeinterface-gui with latest results...")
-        self._launch_spikeinterface_gui(self._last_success_results_path)
 
     def _is_pdf_file_in_use(self, folder_path, sorter_name):
         """Check if the PDF output file exists and is open by another process."""
@@ -1067,9 +1182,10 @@ class PipelineGUI(QMainWindow):
             use_trigger = self.use_trigger_cb.isChecked()
             sorter_name = self.sorter_combo.currentText().strip()
             protocol_params = self._protocol_params
-            bandpass = protocol_params.get("preprocessing", {}).get("bandpass_filter", {})
-            min_freq = float(bandpass.get("freq_min", 400))
-            max_freq = float(bandpass.get("freq_max", 5000))
+            prep = protocol_params.get("preprocessing", {})
+            filter_type, min_freq, max_freq = get_preprocessing_filter_freqs(prep)
+            if filter_type not in ("bandpass", "highpass", "lowpass"):
+                filter_type = "bandpass"
             trigger_threshold = None
             trigger_edge = None
             trigger_min_interval = None
@@ -1090,10 +1206,17 @@ class PipelineGUI(QMainWindow):
             my_probe_path = self._get_probe_path_for_pipeline(output_folder)
             if not my_probe_path or not os.path.isfile(my_probe_path):
                 raise ValueError("Probe file is missing or does not exist. Load a probe via MEA Editor first.")
-            if min_freq <= 0 or max_freq <= 0:
-                raise ValueError("protocol min_freq and max_freq must be > 0.")
-            if min_freq >= max_freq:
-                raise ValueError("protocol min_freq must be < max_freq.")
+            if filter_type == "bandpass":
+                if min_freq <= 0 or max_freq <= 0:
+                    raise ValueError("protocol min_freq and max_freq must be > 0.")
+                if min_freq >= max_freq:
+                    raise ValueError("protocol min_freq must be < max_freq.")
+            elif filter_type == "highpass":
+                if min_freq <= 0:
+                    raise ValueError("protocol highpass cutoff must be > 0.")
+            elif filter_type == "lowpass":
+                if max_freq <= 0:
+                    raise ValueError("protocol lowpass cutoff must be > 0.")
             if use_trigger:
                 if trigger_edge not in (-1, 1):
                     raise ValueError("trigger polarity must be 'Rising Edge' or 'Falling Edge'.")
