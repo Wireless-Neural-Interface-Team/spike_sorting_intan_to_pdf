@@ -1,18 +1,19 @@
 {
-  "folder_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Test/ledstim test",
+  "folder_path": "D:/Pierre/20260416/lightstim_2000ms_20s_retina_P17_MEA60_RdLGN_AuNi_1_260416_134007",
   "use_trigger": true,
   "trigger_type": "electric",
   "trigger_threshold": "37000",
   "trigger_polarity": "Falling Edge",
   "trigger_min_interval": "5.1",
   "trigger_channel_index": "0",
-  "sorter_name": "spykingcircus2",
-  "my_probe_path": "C:/Users/WNIlabs/Documents/Pierre/Electrophy/Test/MEA_RdLGN64.json",
+  "sorter_name": "lupin",
+  "my_probe_path": "C:/Users/WNIlabs/Documents/Pierre/MEA routing/MEA_RdLGN64.json",
   "protocol_params": {
     "preprocessing": {
-      "filter_type": "highpass",
-      "highpass_filter": {
-        "freq_min": 400.0
+      "filter_type": "bandpass",
+      "bandpass_filter": {
+        "freq_min": 400.0,
+        "freq_max": 5000.0
       }
     },
     "postprocessing": {
@@ -25,7 +26,7 @@
         "bin_ms": 1.0
       },
       "waveforms": {
-        "ms_before": 2.0,
+        "ms_before": 1.0,
         "ms_after": 2.0
       },
       "templates": {},

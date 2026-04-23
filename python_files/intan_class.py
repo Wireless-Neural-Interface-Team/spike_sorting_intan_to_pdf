@@ -178,19 +178,44 @@ class IntanFile:
         self._probe = probe
         probe_df = self._probe._dataframe
 
+        channel_ids_str = [str(ch) for ch in self.channel_ids]
+        recording_ids_set = set(channel_ids_str)
+
         # Keep only probe contacts present in recording channels.
         probe_df["contact_ids"] = probe_df["contact_ids"].astype(str)
-        probe_df = probe_df[probe_df["contact_ids"].isin([str(ch) for ch in self.channel_ids])]
+        probe_df = probe_df[probe_df["contact_ids"].isin(channel_ids_str)]
         probe_df = probe_df.drop_duplicates(subset="contact_ids")
         # Vérifier que le nombre de contacts du côté probe correspond à celui de l'enregistrement
         n_probe_contacts = len(probe_df)
         n_recording_channels = len(self.channel_ids)
         if n_probe_contacts != n_recording_channels:
-            raise ValueError(
-                f"Incohérence entre le nombre de contacts du probe ({n_probe_contacts}) "
-                f"et le nombre de canaux de l'enregistrement ({n_recording_channels}). "
-                "Vérifiez le mapping des 'contact_ids' ou la sélection des canaux."
+            probe_ids_set = set(probe_df["contact_ids"])
+            missing_on_probe = sorted(
+                recording_ids_set - probe_ids_set,
+                key=lambda x: (len(str(x)), str(x)),
             )
+            msg_parts = [
+                f"Incohérence entre le nombre de contacts du probe ({n_probe_contacts}) "
+                f"et le nombre de canaux de l'enregistrement ({n_recording_channels}).",
+            ]
+            if missing_on_probe:
+                limit = 100
+                head = ", ".join(missing_on_probe[:limit])
+                tail = (
+                    f" … (+{len(missing_on_probe) - limit} autres)"
+                    if len(missing_on_probe) > limit
+                    else ""
+                )
+                msg_parts.append(
+                    "Canaux de l'enregistrement sans entrée probe (contact_ids manquants): "
+                    f"{head}{tail}"
+                )
+            else:
+                msg_parts.append(
+                    "Aucun canal 'manquant' détecté par simple différence d'ensembles : "
+                    "vérifiez les contact_ids en double sur le probe ou des incohérences d'identifiants."
+                )
+            raise ValueError(" ".join(msg_parts))
         probe_df = probe_df.sort_values(by="device_channel_indices")
         #Renumerotation des device_channel_indices because python starts from 0
         #If you remove the next line, python will show you an error showing that the device_channnel
